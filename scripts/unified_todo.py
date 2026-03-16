@@ -71,11 +71,10 @@ def cmd_list():
         print("✅ 没有待办任务。")
 
 def cmd_add(text, category='Inbox', cycle_type='once', **kwargs):
-    """添加任务"""
-    is_financial = kwargs.get('financial', False) or any(kw in text for kw in ['银行', '华夏', '浦大', '携程', '京东', '活动', '秒杀'])
-    
-    if is_financial and cycle_type != 'once':
-        # 使用 financial_activity_manager.py 添加
+    """添加任务（自动路由：非 once 周期任务使用 manager，once 或简单任务直接插入）"""
+    # 只要不是 once 类型，都走 manager（支持所有复杂周期）
+    if cycle_type != 'once':
+        # 使用 financial_activity_manager.py 添加（更名为 manager）
         manager_script = WORKSPACE / 'skills' / 'chronos' / 'scripts' / 'financial_activity_manager.py'
         args = [
             'python3', str(manager_script),
