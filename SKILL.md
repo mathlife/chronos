@@ -1,97 +1,88 @@
 ---
 name: chronos
 description: 通用周期任务管理器 - 支持6种周期类型、每月N次配额、自动cron、统一视图，适用于所有定时任务场景
-version: 1.0.0
+version: 1.1.0
 metadata: {"openclaw":{"emoji":"⏰","requires":{"bins":["sqlite3","openclaw"]}}}
 user-invocable: true
 ---
 
-# Custom Todo Manager
+# Chronos - Universal Periodic Task Manager
 
 ## What this skill controls
-- **金融活动表**：`financial_activities` + `financial_occurrences`（在 `./todo.db`）
-- **原 todo 表**：`entries`（兼容旧任务）
-- **统一入口**：`unified_todo.py`
+- **周期任务表**：`periodic_tasks` + `periodic_occurrences`（在 `./todo.db`）
+- **原 todo 表**：`entries`（兼容旧一次性任务）
+- **统一入口**：`todo.py`
 
 ## Capabilities
 
 ### 周期类型
 - `once`：一次性
 - `daily`：每天
-- `weekly`：每周指定星期
-- `monthly_fixed`：每月固定日期
-- `monthly_range`：每月区间（如11号→次月5号）
-- `monthly_n_times`：每月N次（基于活动日计数，配额用完后自动完成剩余日期）
+- `weekly`：每周（指定星期几）
+- `monthly_fixed`：每月固定日期（如15号）
+- `monthly_range`：每月区间（如11号→5号，跨月）
+- `monthly_n_times`：每月限次（如每周三，每月最多2次）
 
-### 自动功能
-- 每天 03:30 自动运行管理器，生成今日提醒
-- 配额在每月1号自动重置
-- 完成任务时自动清理原 entries（标记 done）
-- Cron 任务自动创建/清理（单次触发后自动删除）
+### 智能配额
+- 仅 `completed` 计数，`skip` 不计
+- 配额用满后自动完成当月剩余活动日
+- 每月1号自动重置计数器
 
-## Commands
+### 自动提醒
+- Cron 任务自动生成（未来事件）
+- 每日自动清理过期 cron
+- 时间已过则跳过（避免错误）
 
-### unified_todo.py（主入口）
+### 统一视图
+- `todo.py list`：合并显示周期任务和普通任务
+- `todo.py add`：智能路由（周期任务 → manager，一次性 → entries）
+- `todo.py complete`：完成单个 occurrence 或普通任务
+- `todo.py show`：查看详情
 
-```bash
-# 列出所有待办（合并金融活动 + 其他任务）
-python3 skills/custom-todo-manager/scripts/unified_todo.py list
-
-# 添加任务
-python3 skills/custom-todo-manager/scripts/unified_todo.py add "任务名" \
-  [--category "分组"] \
-  [--financial] \
-  [--cycle-type once|daily|weekly|monthly_fixed|monthly_range|monthly_n_times] \
-  [--time "HH:MM"] \
-  [--weekday 0-6] \
-  [--day 1-31] \
-  [--range-start 1-31 --range-end 1-31] \
-  [--n-per-month N]
-
-# 完成任务
-python3 skills/custom-todo-manager/scripts/unified_todo.py complete <ID|FIN-occ_id>
-
-# 查看详情
-python3 skills/custom-todo-manager/scripts/unified_todo.py show <ID|FIN-occ_id>
-```
-
-### financial_activity_manager.py（直接调用）
+## Usage
 
 ```bash
-# 每日自动运行（由 cron 03:30 触发）
-python3 skills/custom-todo-manager/scripts/financial_activity_manager.py
+# 列出所有待办（自动确保今天 occurrence 已生成）
+python3 skills/chronos/scripts/todo.py list
 
-# 手动添加活动
-python3 skills/custom-todo-manager/scripts/financial_activity_manager.py --add \
-  --name "活动名" \
-  --category "金融/活动" \
+# 添加周期任务（例如：每月2次，每周三10:00）
+python3 skills/chronos/scripts/todo.py add "周三抢券" \
   --cycle-type monthly_n_times \
   --weekday 2 \
-  --n-per-month 1 \
-  --time "10:00"
+  --n-per-month 2 \
+  --time 10:00
 
-# 批量完成活动（完成当期剩余 + 清理 cron + 清理原 entries）
-python3 skills/custom-todo-manager/scripts/financial_activity_manager.py --complete-activity <activity_id>
+# 添加一次性任务
+python3 skills/chronos/scripts/todo.py add "买牛奶" --category 生活
+
+# 完成任务
+python3 skills/chronos/scripts/todo.py complete FIN-123  # 周期任务 occurrence
+python3 skills/chronos/scripts/todo.py complete 45      # 普通任务 ID
+
+# 查看详情
+python3 skills/chronos/scripts/todo.py show FIN-123
 ```
 
-### migrate_entries_to_financial.py（数据迁移）
+## Database Schema
 
-```bash
-# 预览迁移计划
-python3 skills/custom-todo-manager/scripts/migrate_entries_to_financial.py
+### periodic_tasks
+- `id`, `name`, `category`, `cycle_type`, `weekday`, `day_of_month`, `range_start`, `range_end`, `n_per_month`
+- `time_of_day`, `event_time`, `timezone`, `is_active`, `count_current_month`, `created_at`, `updated_at`
 
-# 执行迁移（将 entries 中的金融活动迁移到新表，原条目标记 done）
-python3 skills/custom-todo-manager/scripts/migrate_entries_to_financial.py --execute
-```
+### periodic_occurrences
+- `id`, `task_id`, `date`, `status` (pending/reminded/completed/skipped)
+- `reminder_job_id`, `is_auto_completed`, `completed_at`
 
-## Notes
-
-- 金融活动的 `occurrences` 表按天生成，状态：`pending`/`reminded`/`completed`/`skipped`
-- `monthly_n_times` 类型：配额用完前，符合条件的活动日生成 `pending`；配额用完后，剩余活动日自动 `completed`
-- 原 `todo.sh` 仍然可用（非金融任务），但建议统一使用 `unified_todo.py`
+### entries + groups
+- 旧表，用于一次性任务，保留兼容
 
 ## Migration
 
-1. 确认数据无误后，运行迁移脚本
-2. 将日常使用的命令切换为 `unified_todo.py`
-3. 可保留 `todo-management` skill 以备兼容，但建议逐步淘汰
+旧 `financial_activities` 和 `financial_occurrences` 数据已自动迁移到新表。旧表已删除。
+
+## Notes
+
+- 所有时间基于 `Asia/Shanghai` 时区
+- Cron 提醒转换为 UTC 后提交给 Gateway
+- `todo.py list` 调用 `--ensure-today` 轻量生成（不安排 cron），完整 cron 由每日 manager 负责
+- 双环学习集成在 `periodic_task_manager.py` 的关键操作中

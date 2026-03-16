@@ -8,18 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Initial release of custom-todo-manager
-- Unified todo entry point (`unified_todo.py`)
-- Financial activity manager with 6 cycle types
-- Monthly N times quota system
-- Double-loop learning integration
-- Migration script from todo-management
+- **Major Refactor**: Renamed to **Chronos** - Universal Periodic Task Manager
+- Generic naming: `financial_*` → `periodic_*` (tables, variables, scripts)
+- Standalone unified entry: `todo.py` (replaces `unified_todo.py`)
+- New manager: `periodic_task_manager.py` (replaces `financial_activity_manager.py`)
+- Database schema: `periodic_tasks` + `periodic_occurrences`
+- Support for all periodic use cases (not just financial)
+- Robust cron scheduling with past-time protection
+- Quota auto-complete fix (only completes up to today)
 
 ### Changed
-- N/A
+- Unified todo no longer calls `todo.sh` - direct database access
+- Improved `complete_activity_cycle` logic to avoid auto-completing future dates
 
 ### Fixed
-- N/A
+- Cron scheduling failures for past times (now skipped)
+- monthly_n_times auto-complete bug (limited to current month up to today)
+
+## [1.0.0] - 2026-03-16
+
+Initial stable release.
 
 ## [1.0.0] - 2026-03-16
 
