@@ -81,16 +81,31 @@ class PeriodicTaskManager:
         return row[0] if row else None
 
     def schedule_reminder_cron(self, task_id: int, occ_date: date, time_of_day: str) -> Optional[str]:
-        """Create a one-shot cron job for this occurrence. Returns job_name or None if in past."""
+        """Create a one-shot cron job for this occurrence. Returns job_name or None if in past.
+        Reminder is scheduled 5 minutes before the actual event time."""
         cur = self.db.execute("SELECT name FROM periodic_tasks WHERE id = ?", (task_id,))
         row = cur.fetchone()
         if not row:
             return None
         task_name = row[0]
         
+        # Parse time_of_day and subtract 5 minutes for reminder
+        hour, minute = map(int, time_of_day.split(':'))
+        reminder_minute = minute - 5
+        reminder_hour = hour
+        reminder_date = occ_date
+        
+        # Handle underflow (e.g., 00:05 -> 23:55 previous day)
+        if reminder_minute < 0:
+            reminder_minute += 60
+            reminder_hour -= 1
+            if reminder_hour < 0:
+                reminder_hour += 24
+                reminder_date = occ_date - timedelta(days=1)
+        
         # Combine date + time in Shanghai timezone, convert to UTC ISO
-        dt_shanghai = datetime(occ_date.year, occ_date.month, occ_date.day, 
-                               *map(int, time_of_day.split(':')), tzinfo=SHANGHAI_TZ)
+        dt_shanghai = datetime(reminder_date.year, reminder_date.month, reminder_date.day,
+                               reminder_hour, reminder_minute, tzinfo=SHANGHAI_TZ)
         utc_dt = dt_shanghai.astimezone(ZoneInfo('UTC'))
         
         # Check if the time is in the past
@@ -114,7 +129,7 @@ class PeriodicTaskManager:
         iso_time = utc_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
         
         job_name = f"task_reminder_{task_id}_{occ_date.strftime('%Y%m%d')}"
-        message_text = f"⏰ 周期任务提醒：{task_name} 即将开始"
+        message_text = f"⏰ 周期任务提醒（提前5分钟）：{task_name} 即将开始"
         
         cmd = [
             "openclaw", "cron", "add",
