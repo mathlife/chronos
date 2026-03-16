@@ -120,7 +120,9 @@ class PeriodicTaskManager:
                     "--name", f"reminder_immediate_{task_id}_{occ_date.strftime('%Y%m%d%H%M')}",
                     "--at", now_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
                     "--system-event", message_text,
-                    "--session", "main"
+                    "--session", "main",
+                    "--delivery-mode", "announce",
+                    "--delivery-channel", "last"
                 ], capture_output=True, text=True, timeout=10)
             except Exception as e:
                 print(f"Failed to send immediate reminder: {e}")
@@ -136,7 +138,9 @@ class PeriodicTaskManager:
             "--name", job_name,
             "--at", iso_time,
             "--system-event", message_text,
-            "--session", "main"
+            "--session", "main",
+            "--delivery-mode", "announce",
+            "--delivery-channel", "last"
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
