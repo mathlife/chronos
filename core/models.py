@@ -19,6 +19,7 @@ class PeriodicTask:
     timezone: str = 'Asia/Shanghai'
     is_active: bool = True
     count_current_month: int = 0
+    end_date: Optional[str] = None  # YYYY-MM-DD, NULL means no end
     created_at: str = field(default_factory=lambda: date.today().isoformat())
     updated_at: str = field(default_factory=lambda: date.today().isoformat())
 

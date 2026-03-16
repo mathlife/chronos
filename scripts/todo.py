@@ -39,8 +39,9 @@ def parse_natural_language(text: str) -> dict:
     
     # 添加命令
     if re.search(r'添加|新增|创建', text):
-        # 提取结束日期（如果有）
+        # 提取结束日期（支持多种格式）
         end_date = None
+        # 格式1: 到2025年3月31日结束
         end_match = re.search(r'到(\d{4})年(\d{1,2})月(\d{1,2})日结束', text)
         if end_match:
             year = int(end_match.group(1))
@@ -48,18 +49,37 @@ def parse_natural_language(text: str) -> dict:
             day = int(end_match.group(3))
             end_date = f"{year:04d}-{month:02d}-{day:02d}"
         else:
-            # 简单格式：到3月31日结束
+            # 格式2: 到3月31日结束
             end_match2 = re.search(r'到(\d{1,2})月(\d{1,2})日结束', text)
             if end_match2:
                 month = int(end_match2.group(1))
                 day = int(end_match2.group(2))
-                # 假设今年
                 year = datetime.now().year
                 end_date = f"{year:04d}-{month:02d}-{day:02d}"
+            else:
+                # 格式3: 结束日期20260630 (8位) 或 2026063 (7位，少见)
+                end_match3 = re.search(r'结束日期(\d{6,8})', text)
+                if end_match3:
+                    date_str = end_match3.group(1)
+                    if len(date_str) == 6:
+                        # yyMMdd - 假设2026年
+                        year = 2026
+                        month = int(date_str[:2])
+                        day = int(date_str[2:4])
+                    elif len(date_str) == 8:
+                        year = int(date_str[:4])
+                        month = int(date_str[4:6])
+                        day = int(date_str[6:8])
+                    else:
+                        # 7位，可能是 yyyyMdd 或 yyMMdd 变种，跳过
+                        pass
+                    if 'year' in locals():
+                        end_date = f"{year:04d}-{month:02d}-{day:02d}"
         
-        # 移除结束时间标记（不影响原始文本用于解析其他字段）
+        # 移除结束日期标记（不影响原始文本用于解析其他字段）
         text_clean = re.sub(r'到\d{4}年\d{1,2}月\d{1,2}日结束', '', text)
         text_clean = re.sub(r'到\d{1,2}月\d{1,2}日结束', '', text_clean)
+        text_clean = re.sub(r'结束日期\d{6,8}', '', text_clean)
         
         # 提取任务名
         name = '新任务'

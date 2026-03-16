@@ -96,8 +96,20 @@ class PeriodicTaskManager:
         # Check if the time is in the past
         now_utc = datetime.now(ZoneInfo('UTC'))
         if utc_dt <= now_utc:
-            # Time already passed, skip cron scheduling (occurrence remains pending for manual completion)
-            return None
+            # Time already passed: send immediate reminder as system event
+            message_text = f"⏰ 周期任务提醒（补发）：{task_name} 已到时间（{occ_date} {time_of_day}）"
+            try:
+                # Send immediate system event
+                subprocess.run([
+                    "openclaw", "cron", "add",
+                    "--name", f"reminder_immediate_{task_id}_{occ_date.strftime('%Y%m%d%H%M')}",
+                    "--at", now_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                    "--system-event", message_text,
+                    "--session", "main"
+                ], capture_output=True, text=True, timeout=10)
+            except Exception as e:
+                print(f"Failed to send immediate reminder: {e}")
+            return None  # No persistent cron job
         
         iso_time = utc_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
         
