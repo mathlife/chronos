@@ -1,10 +1,10 @@
-"""Data models for financial activities."""
+"""Data models for periodic tasks."""
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional, List
 
 @dataclass
-class FinancialActivity:
+class PeriodicTask:
     id: int
     name: str
     category: str = 'Inbox'
@@ -27,9 +27,9 @@ class FinancialActivity:
         return self.cycle_type == 'monthly_n_times'
 
 @dataclass
-class FinancialOccurrence:
+class PeriodicOccurrence:
     id: int
-    activity_id: int
+    task_id: int
     date: date
     status: str = 'pending'  # pending|reminded|completed|skipped
     reminder_job_id: Optional[str] = None

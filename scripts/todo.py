@@ -2,7 +2,7 @@
 """
 Unified Todo - 统一待办管理入口
 支持：list/add/complete/show
-自动路由：金融活动 → financial_activity_manager，其他 → 直接操作 entries 表
+自动路由：周期任务 → periodic_task_manager，其他 → 直接操作 entries 表
 """
 import sqlite3
 import subprocess
@@ -16,17 +16,17 @@ WORKSPACE = Path("/home/ubuntu/.openclaw/workspace")
 TODO_DB = WORKSPACE / "todo.db"
 SHANGHAI_TZ = ZoneInfo('Asia/Shanghai')
 
-def get_financial_pending():
-    """获取金融活动待办"""
+def get_periodic_pending():
+    """获取周期任务待办"""
     conn = sqlite3.connect(TODO_DB)
     cur = conn.cursor()
     cur.execute("""
-        SELECT a.id as activity_id, a.name, a.category, a.cycle_type, 
+        SELECT t.id as task_id, t.name, t.category, t.cycle_type, 
                o.id as occ_id, o.date, o.status
-        FROM financial_occurrences o
-        JOIN financial_activities a ON o.activity_id = a.id
+        FROM periodic_occurrences o
+        JOIN periodic_tasks t ON o.task_id = t.id
         WHERE o.status IN ('pending', 'reminded')
-        ORDER BY o.date, a.name
+        ORDER BY o.date, t.name
     """)
     rows = cur.fetchall()
     conn.close()
@@ -49,14 +49,25 @@ def get_simple_pending():
 
 def cmd_list():
     """列出所有待办（合并视图）"""
-    financial = get_financial_pending()
+    # 确保今天的 occurrence 已生成（不包含清理逻辑）
+    manager_script = WORKSPACE / 'skills' / 'chronos' / 'scripts' / 'periodic_task_manager.py'
+    try:
+        subprocess.run(
+            ['python3', str(manager_script), '--ensure-today'],
+            capture_output=True,
+            timeout=10  # 防止卡死
+        )
+    except Exception as e:
+        print(f"⚠️  生成今日任务失败: {e}")
+    
+    periodic = get_periodic_pending()
     simple = get_simple_pending()
     
     print("=== Chronos Todo List ===\n")
     
-    if financial:
-        print("【金融活动】")
-        for activity_id, name, category, cycle_type, occ_id, date_str, status in financial:
+    if periodic:
+        print("【周期任务】")
+        for task_id, name, category, cycle_type, occ_id, date_str, status in periodic:
             print(f"  [FIN-{occ_id}] {date_str} | {name} ({cycle_type}) | {status}")
         print()
     
@@ -67,15 +78,15 @@ def cmd_list():
             print(f"  [ID{entry_id}] {group} | {text} | {status}")
         print()
     
-    if not financial and not simple:
+    if not periodic and not simple:
         print("✅ 没有待办任务。")
 
 def cmd_add(text, category='Inbox', cycle_type='once', **kwargs):
     """添加任务（自动路由：非 once 周期任务使用 manager，once 或简单任务直接插入）"""
     # 只要不是 once 类型，都走 manager（支持所有复杂周期）
     if cycle_type != 'once':
-        # 使用 financial_activity_manager.py 添加（更名为 manager）
-        manager_script = WORKSPACE / 'skills' / 'chronos' / 'scripts' / 'financial_activity_manager.py'
+        # 使用 periodic_task_manager.py 添加
+        manager_script = WORKSPACE / 'skills' / 'chronos' / 'scripts' / 'periodic_task_manager.py'
         args = [
             'python3', str(manager_script),
             '--add',
@@ -95,7 +106,7 @@ def cmd_add(text, category='Inbox', cycle_type='once', **kwargs):
         
         result = subprocess.run(args, capture_output=True, text=True)
         if result.returncode == 0:
-            print(f"✅ 已添加金融活动：{text}")
+            print(f"✅ 已添加周期任务：{text}")
         else:
             print(f"❌ 添加失败：{result.stderr}")
     else:
@@ -128,15 +139,40 @@ def cmd_complete(identifier):
     """完成待办"""
     if identifier.startswith('FIN-'):
         occ_id = int(identifier[4:])
-        manager_script = WORKSPACE / 'skills' / 'chronos' / 'scripts' / 'financial_activity_manager.py'
-        result = subprocess.run(
-            ['python3', str(manager_script), '--complete-activity', str(occ_id)],
-            capture_output=True, text=True
-        )
-        if result.returncode == 0:
-            print(f"✅ 已完成金融活动 ID {identifier}")
-        else:
-            print(f"❌ 完成失败：{result.stderr}")
+        try:
+            conn = sqlite3.connect(TODO_DB)
+            cur = conn.cursor()
+            # 获取 occurrence 信息
+            cur.execute("SELECT task_id, date FROM periodic_occurrences WHERE id = ?", (occ_id,))
+            row = cur.fetchone()
+            if not row:
+                print(f"❌ 未找到 FIN-{occ_id}")
+                conn.close()
+                return
+            task_id, date_str = row
+            
+            # 标记 occurrence 为 completed
+            cur.execute("UPDATE periodic_occurrences SET status = 'completed' WHERE id = ?", (occ_id,))
+            affected = cur.rowcount
+            
+            # 如果是 monthly_n_times，增加计数
+            cur.execute("SELECT cycle_type FROM periodic_tasks WHERE id = ?", (task_id,))
+            cycle_type = cur.fetchone()[0]
+            if cycle_type == 'monthly_n_times':
+                cur.execute("UPDATE periodic_tasks SET count_current_month = count_current_month + 1 WHERE id = ?", (task_id,))
+            
+            conn.commit()
+            conn.close()
+            
+            # 清理该 task 的 cron 任务（并检查配额）
+            manager_script = WORKSPACE / 'skills' / 'chronos' / 'scripts' / 'periodic_task_manager.py'
+            result = subprocess.run(
+                ['python3', str(manager_script), '--complete-activity', str(task_id)],
+                capture_output=True, text=True
+            )
+            print(f"✅ 已完成 FIN-{occ_id}（任务ID {task_id}）")
+        except Exception as e:
+            print(f"❌ 完成失败：{e}")
     else:
         entry_id = int(identifier)
         try:
@@ -159,16 +195,16 @@ def cmd_show(identifier):
         conn = sqlite3.connect(TODO_DB)
         cur = conn.cursor()
         cur.execute("""
-            SELECT a.name, a.cycle_type, o.date, o.status, o.reminder_job_id
-            FROM financial_occurrences o
-            JOIN financial_activities a ON o.activity_id = a.id
+            SELECT t.name, t.cycle_type, o.date, o.status, o.reminder_job_id
+            FROM periodic_occurrences o
+            JOIN periodic_tasks t ON o.task_id = t.id
             WHERE o.id = ?
         """, (occ_id,))
         row = cur.fetchone()
         conn.close()
         if row:
             name, cycle_type, date_str, status, job_id = row
-            print(f"【金融活动】{name}")
+            print(f"【周期任务】{name}")
             print(f"周期类型：{cycle_type}")
             print(f"日期：{date_str}")
             print(f"状态：{status}")
@@ -206,11 +242,13 @@ def main():
     if cmd == 'list':
         cmd_list()
     elif cmd == 'add':
-        # 解析参数
-        text = sys.argv[-1]
+        if len(sys.argv) < 3:
+            print("用法：unified_todo.py add <任务名> [参数]")
+            sys.exit(1)
+        text = sys.argv[2]  # 任务名是 add 后面的第一个参数
         kwargs = {}
-        i = 2
-        while i < len(sys.argv) - 1:
+        i = 3
+        while i < len(sys.argv):
             arg = sys.argv[i]
             if arg == '--category' and i + 1 < len(sys.argv):
                 kwargs['category'] = sys.argv[i+1]; i += 2
@@ -226,8 +264,6 @@ def main():
                 kwargs['range_end'] = int(sys.argv[i+1]); i += 2
             elif arg == '--n-per-month' and i + 1 < len(sys.argv):
                 kwargs['n_per_month'] = int(sys.argv[i+1]); i += 2
-            elif arg == '--financial':
-                kwargs['financial'] = True; i += 1
             elif arg == '--cycle-type' and i + 1 < len(sys.argv):
                 kwargs['cycle_type'] = sys.argv[i+1]; i += 2
             else:

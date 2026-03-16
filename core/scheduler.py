@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from functools import lru_cache
 import re
 
-from .models import FinancialActivity
+from .models import PeriodicTask
 
 SHANGHAI_TZ = ZoneInfo('Asia/Shanghai')
 
@@ -44,34 +44,34 @@ def get_weekdays_in_month(year: int, month: int, weekday: int) -> List[date]:
         current += timedelta(days=1)
     return dates
 
-class ActivityScheduler:
-    """Encapsulates all scheduling logic for financial activities."""
+class TaskScheduler:
+    """Encapsulates all scheduling logic for periodic tasks."""
 
-    def __init__(self, activity: FinancialActivity, as_of: Optional[date] = None):
-        self.activity = activity
+    def __init__(self, task: PeriodicTask, as_of: Optional[date] = None):
+        self.task = task
         self.as_of = to_shanghai_date(as_of)
 
     def should_remind_today(self) -> bool:
         """Check if today matches the cycle and quota allows."""
         today = self.as_of
         
-        if self.activity.cycle_type == 'daily':
+        if self.task.cycle_type == 'daily':
             return True
         
-        if self.activity.cycle_type == 'weekly':
-            return today.weekday() == self.activity.weekday
+        if self.task.cycle_type == 'weekly':
+            return today.weekday() == self.task.weekday
         
-        if self.activity.cycle_type == 'monthly_fixed':
-            return today.day == self.activity.day_of_month
+        if self.task.cycle_type == 'monthly_fixed':
+            return today.day == self.task.day_of_month
         
-        if self.activity.cycle_type == 'monthly_range':
+        if self.task.cycle_type == 'monthly_range':
             return self._in_monthly_range(today)
         
-        if self.activity.cycle_type == 'monthly_n_times':
-            if today.weekday() != self.activity.weekday:
+        if self.task.cycle_type == 'monthly_n_times':
+            if today.weekday() != self.task.weekday:
                 return False
             # Check quota
-            if self.activity.count_current_month >= (self.activity.n_per_month or 0):
+            if self.task.count_current_month >= (self.task.n_per_month or 0):
                 return False
             return True
         
@@ -79,8 +79,8 @@ class ActivityScheduler:
 
     def _in_monthly_range(self, today: date) -> bool:
         """Check if today falls within the configured range (may cross month)."""
-        start = self.activity.range_start
-        end = self.activity.range_end
+        start = self.task.range_start
+        end = self.task.range_end
         if start is None or end is None:
             return False
         
@@ -119,7 +119,7 @@ class ActivityScheduler:
 
     def get_occurrences_for_month(self, year: int, month: int) -> List[date]:
         """Generate all occurrence dates for the given month."""
-        cycle_type = self.activity.cycle_type
+        cycle_type = self.task.cycle_type
         
         if cycle_type == 'daily':
             # Every day of the month
@@ -127,18 +127,18 @@ class ActivityScheduler:
             return [date(year, month, d) for d in range(1, days_in_month+1)]
         
         if cycle_type == 'weekly':
-            return get_weekdays_in_month(year, month, self.activity.weekday)
+            return get_weekdays_in_month(year, month, self.task.weekday)
         
         if cycle_type == 'monthly_fixed':
-            day = self.activity.day_of_month
+            day = self.task.day_of_month
             try:
                 return [date(year, month, day)]
             except ValueError:
                 return []  # Invalid day for this month (e.g., Feb 30)
         
         if cycle_type == 'monthly_range':
-            start = self.activity.range_start
-            end = self.activity.range_end
+            start = self.task.range_start
+            end = self.task.range_end
             if start is None or end is None:
                 return []
             
@@ -174,7 +174,7 @@ class ActivityScheduler:
         
         if cycle_type == 'monthly_n_times':
             # All matching weekdays in month, limited by quota
-            all_dates = get_weekdays_in_month(year, month, self.activity.weekday)
+            all_dates = get_weekdays_in_month(year, month, self.task.weekday)
             return all_dates  # Quota applied elsewhere
         
         return []
@@ -189,10 +189,10 @@ class ActivityScheduler:
         done_dates = {d for d, s in existing_occurrences if s in ('completed', 'skipped')}
         pending_dates = [d for d in all_dates if d not in done_dates]
         
-        if self.activity.cycle_type == 'monthly_n_times':
+        if self.task.cycle_type == 'monthly_n_times':
             # Apply quota limit
-            count_current = self.activity.count_current_month
-            n = self.activity.n_per_month or 0
+            count_current = self.task.count_current_month
+            n = self.task.n_per_month or 0
             # Only keep up to (n - count_current) dates
             allowed = max(0, n - count_current)
             if allowed == 0:

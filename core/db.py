@@ -48,9 +48,9 @@ def db_commit():
     DB().commit()
 
 @lru_cache(maxsize=128)
-def get_financial_activities(active_only: bool = True):
-    """Fetch all financial activities (cached)."""
-    query = "SELECT * FROM financial_activities"
+def get_periodic_tasks(active_only: bool = True):
+    """Fetch all periodic tasks (cached)."""
+    query = "SELECT * FROM periodic_tasks"
     if active_only:
         query += " WHERE is_active = 1"
     cur = DB().execute(query)
@@ -58,13 +58,13 @@ def get_financial_activities(active_only: bool = True):
     return [dict(row) for row in rows]
 
 @lru_cache(maxsize=128)
-def get_financial_activity(activity_id: int):
-    """Fetch single activity by ID (cached)."""
-    cur = DB().execute("SELECT * FROM financial_activities WHERE id = ?", (activity_id,))
+def get_periodic_task(task_id: int):
+    """Fetch single task by ID (cached)."""
+    cur = DB().execute("SELECT * FROM periodic_tasks WHERE id = ?", (task_id,))
     row = cur.fetchone()
     return dict(row) if row else None
 
-def clear_activity_cache():
-    """Clear activity cache (called after updates)."""
-    get_financial_activities.cache_clear()
-    get_financial_activity.cache_clear()
+def clear_task_cache():
+    """Clear task cache (called after updates)."""
+    get_periodic_tasks.cache_clear()
+    get_periodic_task.cache_clear()
