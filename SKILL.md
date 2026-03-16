@@ -1,7 +1,7 @@
 ---
-name: custom-todo-manager
-description: 统一待办管理，支持简单任务和复杂金融活动（区间、每月N次、计数器），自动 cron 提醒，统一视图
-metadata: {"openclaw":{"emoji":"📋","requires":{"bins":["sqlite3","openclaw"]}}}
+name: chronos
+description: 智能周期任务管理器，支持6种周期类型、每月N次配额、自动cron、统一视图
+metadata: {"openclaw":{"emoji":"⏰","requires":{"bins":["sqlite3","openclaw"]}}}
 user-invocable: true
 ---
 
