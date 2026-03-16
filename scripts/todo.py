@@ -3,10 +3,11 @@
 Unified Todo - 统一待办管理入口
 支持：list/add/complete/show
 自动路由：周期任务 → periodic_task_manager，其他 → 直接操作 entries 表
+自然语言解析：支持中文指令
 """
 import sqlite3
 import subprocess
-import json
+import re
 from pathlib import Path
 import sys
 from datetime import datetime, timedelta, date
@@ -15,6 +16,147 @@ from zoneinfo import ZoneInfo
 WORKSPACE = Path("/home/ubuntu/.openclaw/workspace")
 TODO_DB = WORKSPACE / "todo.db"
 SHANGHAI_TZ = ZoneInfo('Asia/Shanghai')
+
+def parse_natural_language(text: str) -> dict:
+    """解析自然语言指令，返回命令和参数"""
+    text = text.strip()
+    
+    # 查询命令
+    if re.search(r'查询|查看|今日|待办|任务', text) and not re.search(r'添加|新增|创建', text):
+        if '详情' in text or re.search(r'FIN-\d+|ID\d+', text):
+            match = re.search(r'(FIN-\d+|ID\d+)', text)
+            if match:
+                return {'cmd': 'show', 'identifier': match.group(1)}
+        else:
+            return {'cmd': 'list'}
+    
+    # 完成命令
+    if re.search(r'完成|标记完成', text):
+        match = re.search(r'(FIN-\d+|ID\d+)', text)
+        if match:
+            return {'cmd': 'complete', 'identifier': match.group(1)}
+        return {'cmd': 'complete', 'identifier': None}
+    
+    # 添加命令
+    if re.search(r'添加|新增|创建', text):
+        # 提取结束日期（如果有）
+        end_date = None
+        end_match = re.search(r'到(\d{4})年(\d{1,2})月(\d{1,2})日结束', text)
+        if end_match:
+            year = int(end_match.group(1))
+            month = int(end_match.group(2))
+            day = int(end_match.group(3))
+            end_date = f"{year:04d}-{month:02d}-{day:02d}"
+        else:
+            # 简单格式：到3月31日结束
+            end_match2 = re.search(r'到(\d{1,2})月(\d{1,2})日结束', text)
+            if end_match2:
+                month = int(end_match2.group(1))
+                day = int(end_match2.group(2))
+                # 假设今年
+                year = datetime.now().year
+                end_date = f"{year:04d}-{month:02d}-{day:02d}"
+        
+        # 移除结束时间标记（不影响原始文本用于解析其他字段）
+        text_clean = re.sub(r'到\d{4}年\d{1,2}月\d{1,2}日结束', '', text)
+        text_clean = re.sub(r'到\d{1,2}月\d{1,2}日结束', '', text_clean)
+        
+        # 提取任务名
+        name = '新任务'
+        
+        # 1. 优先"叫"后面
+        call_match = re.search(r'叫\s*(.+?)(?:，|,|$)', text_clean)
+        if call_match:
+            name = call_match.group(1).strip()
+        else:
+            # 2. 针对每周类型：提取"周X HH:MM"后剩余部分
+            after_add = re.sub(r'^添加\s*(?:待办|任务)?\s*[，,]\s*', '', text_clean)
+            
+            # 匹配"周X 时间"模式
+            weekday_pattern = r'(周[一二三四五六日天]|星期[一二三四五六日天])\s*(\d{1,2})(?:[:：]\s*(\d{2}))?点?'
+            m = re.search(weekday_pattern, after_add)
+            if m:
+                # 周期描述结束位置
+                end_pos = m.end()
+                remaining = after_add[end_pos:].strip('，, ')
+                if remaining:
+                    name = remaining
+                else:
+                    # 没有剩余，用周期描述前的部分
+                    before_part = after_add[:m.start()].strip('，, ')
+                    if before_part:
+                        name = before_part
+            else:
+                # 其他类型：取第一个周期关键词之前
+                keywords = ['每周', '每天', '每日', '每月']
+                first_kw_pos = len(after_add)
+                for kw in keywords:
+                    pos = after_add.find(kw)
+                    if pos != -1 and pos < first_kw_pos:
+                        first_kw_pos = pos
+                
+                if first_kw_pos > 0:
+                    name = after_add[:first_kw_pos].strip('，, ')
+                else:
+                    name = after_add.strip('，, ')
+        
+        # 清理
+        name = re.sub(r'，|,|到\d+年.*$|到.*结束$', '', name).strip()
+        if not name:
+            name = '新任务'
+        
+        params = {'name': name}
+        
+        # 周期类型
+        if '每月' in text and ('次' in text or '最多' in text):
+            params['cycle_type'] = 'monthly_n_times'
+            n_match = re.search(r'每月最多?(\d+)次', text)
+            if n_match:
+                params['n_per_month'] = int(n_match.group(1))
+            weekday_map = {'一':0, '二':1, '三':2, '四':3, '五':4, '六':5, '日':6, '天':6}
+            for char, num in weekday_map.items():
+                if f'周{char}' in text or f'星期{char}' in text:
+                    params['weekday'] = num
+                    break
+        elif '每月' in text and ('号' in text or '日' in text):
+            if '到' in text or '至' in text:
+                params['cycle_type'] = 'monthly_range'
+                range_match = re.search(r'每月(\d+)号到(\d+)号', text)
+                if range_match:
+                    params['range_start'] = int(range_match.group(1))
+                    params['range_end'] = int(range_match.group(2))
+            else:
+                params['cycle_type'] = 'monthly_fixed'
+                day_match = re.search(r'每月(\d+)号', text)
+                if day_match:
+                    params['day_of_month'] = int(day_match.group(1))
+        elif '每周' in text:
+            params['cycle_type'] = 'weekly'
+            weekday_map = {'一':0, '二':1, '三':2, '四':3, '五':4, '六':5, '日':6, '天':6}
+            for char, num in weekday_map.items():
+                if f'周{char}' in text or f'星期{char}' in text:
+                    params['weekday'] = num
+                    break
+        elif '每天' in text or '每日' in text:
+            params['cycle_type'] = 'daily'
+        
+        # 提取时间
+        time_match = re.search(r'(\d{1,2})[:：]\s*(\d{2})', text)
+        if not time_match:
+            time_match = re.search(r'(\d{1,2})点', text)
+        if time_match:
+            hour = int(time_match.group(1))
+            minute = int(time_match.group(2)) if time_match.lastindex >= 2 else 0
+            params['time_of_day'] = f"{hour:02d}:{minute:02d}"
+        else:
+            params['time_of_day'] = '09:00'
+        
+        if end_date:
+            params['end_date'] = end_date
+        
+        return {'cmd': 'add', **params}
+    
+    return {'cmd': 'unknown', 'text': text}
 
 def get_periodic_pending():
     """获取周期任务待办"""
@@ -103,6 +245,8 @@ def cmd_add(text, category='Inbox', cycle_type='once', **kwargs):
             args.extend(['--range-start', str(kwargs['range_start']), '--range-end', str(kwargs['range_end'])])
         if 'n_per_month' in kwargs:
             args.extend(['--n-per-month', str(kwargs['n_per_month'])])
+        if 'end_date' in kwargs:
+            args.extend(['--end-date', kwargs['end_date']])
         
         result = subprocess.run(args, capture_output=True, text=True)
         if result.returncode == 0:
@@ -234,53 +378,108 @@ def cmd_show(identifier):
 
 def main():
     if len(sys.argv) < 2:
-        print("用法：unified_todo.py [list|add|complete|show] [参数]")
+        print("用法：todo.py [list|add|complete|show] [参数] 或直接说自然语言")
         sys.exit(1)
     
-    cmd = sys.argv[1]
-    
-    if cmd == 'list':
-        cmd_list()
-    elif cmd == 'add':
-        if len(sys.argv) < 3:
-            print("用法：unified_todo.py add <任务名> [参数]")
-            sys.exit(1)
-        text = sys.argv[2]  # 任务名是 add 后面的第一个参数
-        kwargs = {}
-        i = 3
-        while i < len(sys.argv):
-            arg = sys.argv[i]
-            if arg == '--category' and i + 1 < len(sys.argv):
-                kwargs['category'] = sys.argv[i+1]; i += 2
-            elif arg == '--time' and i + 1 < len(sys.argv):
-                kwargs['time'] = sys.argv[i+1]; i += 2
-            elif arg == '--weekday' and i + 1 < len(sys.argv):
-                kwargs['weekday'] = int(sys.argv[i+1]); i += 2
-            elif arg == '--day' and i + 1 < len(sys.argv):
-                kwargs['day_of_month'] = int(sys.argv[i+1]); i += 2
-            elif arg == '--range-start' and i + 1 < len(sys.argv):
-                kwargs['range_start'] = int(sys.argv[i+1]); i += 2
-            elif arg == '--range-end' and i + 1 < len(sys.argv):
-                kwargs['range_end'] = int(sys.argv[i+1]); i += 2
-            elif arg == '--n-per-month' and i + 1 < len(sys.argv):
-                kwargs['n_per_month'] = int(sys.argv[i+1]); i += 2
-            elif arg == '--cycle-type' and i + 1 < len(sys.argv):
-                kwargs['cycle_type'] = sys.argv[i+1]; i += 2
-            else:
-                i += 1
-        cmd_add(text, **kwargs)
-    elif cmd == 'complete':
-        if len(sys.argv) < 3:
-            print("用法：unified_todo.py complete <ID|FIN-occ_id>")
-            sys.exit(1)
-        cmd_complete(sys.argv[2])
-    elif cmd == 'show':
-        if len(sys.argv) < 3:
-            print("用法：unified_todo.py show <ID|FIN-occ_id>")
-            sys.exit(1)
-        cmd_show(sys.argv[2])
+    # 检查是否为显式命令
+    explicit_cmd = sys.argv[1]
+    if explicit_cmd in ['list', 'add', 'complete', 'show']:
+        cmd = explicit_cmd
+        if cmd == 'list':
+            cmd_list()
+        elif cmd == 'add':
+            if len(sys.argv) < 3:
+                print("用法：todo.py add <任务名> [参数]")
+                sys.exit(1)
+            text = sys.argv[2]
+            kwargs = {}
+            i = 3
+            while i < len(sys.argv):
+                arg = sys.argv[i]
+                if arg == '--category' and i + 1 < len(sys.argv):
+                    kwargs['category'] = sys.argv[i+1]; i += 2
+                elif arg == '--time' and i + 1 < len(sys.argv):
+                    kwargs['time'] = sys.argv[i+1]; i += 2
+                elif arg == '--weekday' and i + 1 < len(sys.argv):
+                    kwargs['weekday'] = int(sys.argv[i+1]); i += 2
+                elif arg == '--day' and i + 1 < len(sys.argv):
+                    kwargs['day_of_month'] = int(sys.argv[i+1]); i += 2
+                elif arg == '--range-start' and i + 1 < len(sys.argv):
+                    kwargs['range_start'] = int(sys.argv[i+1]); i += 2
+                elif arg == '--range-end' and i + 1 < len(sys.argv):
+                    kwargs['range_end'] = int(sys.argv[i+1]); i += 2
+                elif arg == '--n-per-month' and i + 1 < len(sys.argv):
+                    kwargs['n_per_month'] = int(sys.argv[i+1]); i += 2
+                elif arg == '--cycle-type' and i + 1 < len(sys.argv):
+                    kwargs['cycle_type'] = sys.argv[i+1]; i += 2
+                else:
+                    i += 1
+            cmd_add(text, **kwargs)
+        elif cmd == 'complete':
+            if len(sys.argv) < 3:
+                print("用法：todo.py complete <ID|FIN-occ_id>")
+                sys.exit(1)
+            cmd_complete(sys.argv[2])
+        elif cmd == 'show':
+            if len(sys.argv) < 3:
+                print("用法：todo.py show <ID|FIN-occ_id>")
+                sys.exit(1)
+            cmd_show(sys.argv[2])
     else:
-        print(f"未知命令：{cmd}")
+        nl_text = ' '.join(sys.argv[1:])
+        parsed = parse_natural_language(nl_text)
+        if parsed['cmd'] == 'unknown':
+            print(f"无法识别的指令：{nl_text}")
+            print("支持的指令：添加待办、查询待办、完成任务、查看详情")
+            sys.exit(1)
+        elif parsed['cmd'] == 'list':
+            cmd_list()
+        elif parsed['cmd'] == 'complete':
+            if parsed.get('identifier'):
+                cmd_complete(parsed['identifier'])
+            else:
+                print("请指定要完成的任务 ID（如 FIN-123 或 45）")
+                sys.exit(1)
+        elif parsed['cmd'] == 'show':
+            if parsed.get('identifier'):
+                cmd_show(parsed['identifier'])
+            else:
+                print("请指定要查看的任务 ID")
+                sys.exit(1)
+        elif parsed['cmd'] == 'add':
+            name = parsed.get('name', '新任务')
+            category = parsed.get('category', 'Inbox')
+            cycle_type = parsed.get('cycle_type', 'once')
+            time_of_day = parsed.get('time_of_day', '09:00')
+            weekday = parsed.get('weekday')
+            day_of_month = parsed.get('day_of_month')
+            range_start = parsed.get('range_start')
+            range_end = parsed.get('range_end')
+            n_per_month = parsed.get('n_per_month')
+            end_date = parsed.get('end_date')
+            
+            # 打印解析结果（调试用）
+            print(f"🔍 解析结果：名称={name}, 周期={cycle_type}, 时间={time_of_day}, 星期={weekday}, 日期={day_of_month}, 区间={range_start}-{range_end}, 次数={n_per_month}, 结束={end_date}")
+            
+            kwargs = {
+                'category': category,
+                'cycle_type': cycle_type,
+                'time': time_of_day,
+            }
+            if weekday is not None:
+                kwargs['weekday'] = weekday
+            if day_of_month is not None:
+                kwargs['day_of_month'] = day_of_month
+            if range_start is not None:
+                kwargs['range_start'] = range_start
+            if range_end is not None:
+                kwargs['range_end'] = range_end
+            if n_per_month is not None:
+                kwargs['n_per_month'] = n_per_month
+            if end_date is not None:
+                kwargs['end_date'] = end_date
+            
+            cmd_add(name, **kwargs)
 
 if __name__ == "__main__":
     main()

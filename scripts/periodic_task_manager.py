@@ -28,37 +28,45 @@ class PeriodicTaskManager:
 
     def add_activity(self, **params) -> int:
         """Add a new periodic task."""
-        cur = self.db.execute("""
-            INSERT INTO periodic_tasks 
-            (name, category, cycle_type, weekday, day_of_month, range_start, range_end, n_per_month, 
-             time_of_day, event_time, timezone, is_active, count_current_month, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Asia/Shanghai', 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        """, (
-            params.get('name'),
-            params.get('category', 'Inbox'),
-            params.get('cycle_type', 'once'),
-            params.get('weekday'),
-            params.get('day_of_month'),
-            params.get('range_start'),
-            params.get('range_end'),
-            params.get('n_per_month'),
-            params.get('time_of_day', '09:00'),
-            params.get('time_of_day', '09:00')
-        ))
-        db_commit()
-        clear_task_cache()
-        return cur.lastrowid
+        with LearningContext("add_activity", 
+                             f"Add task: {params.get('name')} ({params.get('cycle_type')})",
+                             confidence="H"):
+            cur = self.db.execute("""
+                INSERT INTO periodic_tasks 
+                (name, category, cycle_type, weekday, day_of_month, range_start, range_end, n_per_month, 
+                 time_of_day, event_time, timezone, is_active, count_current_month, end_date, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Asia/Shanghai', 1, 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """, (
+                params.get('name'),
+                params.get('category', 'Inbox'),
+                params.get('cycle_type', 'once'),
+                params.get('weekday'),
+                params.get('day_of_month'),
+                params.get('range_start'),
+                params.get('range_end'),
+                params.get('n_per_month'),
+                params.get('time_of_day', '09:00'),
+                params.get('time_of_day', '09:00'),
+                params.get('end_date')
+            ))
+            db_commit()
+            clear_task_cache()
+            activity_id = cur.lastrowid
+            return activity_id
 
     def reset_monthly_counters(self, today: date):
         """Reset monthly_n_times counters on the 1st."""
         if today.day == 1:
-            self.db.execute("""
-                UPDATE periodic_tasks 
-                SET count_current_month = 0 
-                WHERE cycle_type = 'monthly_n_times' AND is_active = 1
-            """)
-            db_commit()
-            clear_task_cache()
+            with LearningContext("reset_monthly_counters", 
+                                 f"Reset monthly counters for {today.strftime('%Y-%m')}",
+                                 confidence="H"):
+                self.db.execute("""
+                    UPDATE periodic_tasks 
+                    SET count_current_month = 0 
+                    WHERE cycle_type = 'monthly_n_times' AND is_active = 1
+                """)
+                db_commit()
+                clear_task_cache()
 
     def create_occurrence_if_missing(self, task_id: int, occ_date: date) -> int:
         """Create occurrence row if not exists. Returns occurrence ID or None."""
@@ -177,75 +185,81 @@ class PeriodicTaskManager:
 
     def complete_occurrence(self, occurrence_id: int) -> bool:
         """Mark an occurrence as completed."""
-        cur = self.db.execute("""
-            UPDATE periodic_occurrences 
-            SET status = 'completed', completed_at = CURRENT_TIMESTAMP 
-            WHERE id = ? AND status != 'completed'
-        """, (occurrence_id,))
-        affected = cur.rowcount
-        if affected > 0:
-            db_commit()
-            # If monthly_n_times, increment counter
-            cur = self.db.execute("SELECT task_id FROM periodic_occurrences WHERE id = ?", (occurrence_id,))
-            row = cur.fetchone()
-            if row:
-                task_id = row[0]
-                cur = self.db.execute("SELECT cycle_type FROM periodic_tasks WHERE id = ?", (task_id,))
-                cycle_type_row = cur.fetchone()
-                if cycle_type_row and cycle_type_row[0] == 'monthly_n_times':
-                    self.db.execute("UPDATE periodic_tasks SET count_current_month = count_current_month + 1 WHERE id = ?", (task_id,))
-                    db_commit()
-        return affected > 0
+        with LearningContext("complete_occurrence", 
+                             f"Complete occurrence {occurrence_id}",
+                             confidence="H"):
+            cur = self.db.execute("""
+                UPDATE periodic_occurrences 
+                SET status = 'completed', completed_at = CURRENT_TIMESTAMP 
+                WHERE id = ? AND status != 'completed'
+            """, (occurrence_id,))
+            affected = cur.rowcount
+            if affected > 0:
+                db_commit()
+                # If monthly_n_times, increment counter
+                cur = self.db.execute("SELECT task_id FROM periodic_occurrences WHERE id = ?", (occurrence_id,))
+                row = cur.fetchone()
+                if row:
+                    task_id = row[0]
+                    cur = self.db.execute("SELECT cycle_type FROM periodic_tasks WHERE id = ?", (task_id,))
+                    cycle_type_row = cur.fetchone()
+                    if cycle_type_row and cycle_type_row[0] == 'monthly_n_times':
+                        self.db.execute("UPDATE periodic_tasks SET count_current_month = count_current_month + 1 WHERE id = ?", (task_id,))
+                        db_commit()
+            return affected > 0
 
     def complete_activity_cycle(self, task_id: int, as_of: Optional[date] = None) -> int:
         """Complete all pending occurrences for a task up to today."""
-        today = to_shanghai_date(as_of)
-        task = PeriodicTask(**(get_periodic_task(task_id) or {}))
-        affected = 0
-        
-        # 1. Complete all pending up to today (including today)
-        cur = self.db.execute("""
-            SELECT id FROM periodic_occurrences 
-            WHERE task_id = ? AND status = 'pending' 
-              AND date <= ?
-              AND strftime('%Y-%m', date) = ?
-        """, (task_id, today.isoformat(), today.strftime('%Y-%m')))
-        pending_ids = [row[0] for row in cur.fetchall()]
-        
-        for occ_id in pending_ids:
-            self.complete_occurrence(occ_id)
-            affected += 1
-        
-        # 2. For monthly_n_times, check quota and auto-complete remaining in current month if quota full
-        if task.cycle_type == 'monthly_n_times':
-            updated_task = PeriodicTask(**(get_periodic_task(task_id) or {}))
-            if updated_task.count_current_month >= (updated_task.n_per_month or 0):
-                # Auto-complete any remaining pending in current month (future dates)
-                cur = self.db.execute("""
-                    UPDATE periodic_occurrences 
-                    SET status = 'completed', is_auto_completed = 1
-                    WHERE task_id = ? AND status = 'pending' 
-                      AND strftime('%Y-%m', date) = ?
-                """, (task_id, today.strftime('%Y-%m')))
-                affected += cur.rowcount
-                db_commit()
-        
-        # 3. Clear any pending reminder cron jobs for this task (no longer needed)
-        cur = self.db.execute("""
-            SELECT reminder_job_id FROM periodic_occurrences 
-            WHERE task_id = ? AND reminder_job_id IS NOT NULL
-        """, (task_id,))
-        job_names = [row[0] for row in cur.fetchall()]
-        for job_name in job_names:
-            try:
-                subprocess.run(
-                    ["openclaw", "cron", "remove", job_name],
-                    capture_output=True, text=True, timeout=10
-                )
-            except:
-                pass
-        
-        return affected
+        with LearningContext("complete_activity_cycle", 
+                             f"Complete all pending for task {task_id} up to today",
+                             confidence="H"):
+            today = to_shanghai_date(as_of)
+            task = PeriodicTask(**(get_periodic_task(task_id) or {}))
+            affected = 0
+            
+            # 1. Complete all pending up to today (including today)
+            cur = self.db.execute("""
+                SELECT id FROM periodic_occurrences 
+                WHERE task_id = ? AND status = 'pending' 
+                  AND date <= ?
+                  AND strftime('%Y-%m', date) = ?
+            """, (task_id, today.isoformat(), today.strftime('%Y-%m')))
+            pending_ids = [row[0] for row in cur.fetchall()]
+            
+            for occ_id in pending_ids:
+                self.complete_occurrence(occ_id)
+                affected += 1
+            
+            # 2. For monthly_n_times, check quota and auto-complete remaining in current month if quota full
+            if task.cycle_type == 'monthly_n_times':
+                updated_task = PeriodicTask(**(get_periodic_task(task_id) or {}))
+                if updated_task.count_current_month >= (updated_task.n_per_month or 0):
+                    # Auto-complete any remaining pending in current month (future dates)
+                    cur = self.db.execute("""
+                        UPDATE periodic_occurrences 
+                        SET status = 'completed', is_auto_completed = 1
+                        WHERE task_id = ? AND status = 'pending' 
+                          AND strftime('%Y-%m', date) = ?
+                    """, (task_id, today.strftime('%Y-%m')))
+                    affected += cur.rowcount
+                    db_commit()
+            
+            # 3. Clear any pending reminder cron jobs for this task (no longer needed)
+            cur = self.db.execute("""
+                SELECT reminder_job_id FROM periodic_occurrences 
+                WHERE task_id = ? AND reminder_job_id IS NOT NULL
+            """, (task_id,))
+            job_names = [row[0] for row in cur.fetchall()]
+            for job_name in job_names:
+                try:
+                    subprocess.run(
+                        ["openclaw", "cron", "remove", job_name],
+                        capture_output=True, text=True, timeout=10
+                    )
+                except:
+                    pass
+            
+            return affected
 
     def ensure_today_occurrences(self) -> int:
         """Lightweight: only ensure today's occurrences exist (no cleanup, no cron scheduling)."""
@@ -308,6 +322,8 @@ def main():
                     params['range_end'] = int(args[i+1]); i += 2
                 elif args[i] == '--n-per-month' and i + 1 < len(args):
                     params['n_per_month'] = int(args[i+1]); i += 2
+                elif args[i] == '--end-date' and i + 1 < len(args):
+                    params['end_date'] = args[i+1]; i += 2
                 else:
                     i += 1
             

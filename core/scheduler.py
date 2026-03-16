@@ -50,10 +50,21 @@ class TaskScheduler:
     def __init__(self, task: PeriodicTask, as_of: Optional[date] = None):
         self.task = task
         self.as_of = to_shanghai_date(as_of)
+        # 解析 end_date
+        self.end_date = None
+        if task.end_date:
+            try:
+                self.end_date = date.fromisoformat(task.end_date)
+            except ValueError:
+                self.end_date = None
 
     def should_remind_today(self) -> bool:
         """Check if today matches the cycle and quota allows."""
         today = self.as_of
+        
+        # 检查结束日期
+        if self.end_date and today > self.end_date:
+            return False
         
         if self.task.cycle_type == 'daily':
             return True
@@ -118,23 +129,23 @@ class TaskScheduler:
         return False
 
     def get_occurrences_for_month(self, year: int, month: int) -> List[date]:
-        """Generate all occurrence dates for the given month."""
+        """Generate all occurrence dates for the given month, respecting end_date."""
         cycle_type = self.task.cycle_type
         
         if cycle_type == 'daily':
             # Every day of the month
             days_in_month = calendar.monthrange(year, month)[1]
-            return [date(year, month, d) for d in range(1, days_in_month+1)]
+            dates = [date(year, month, d) for d in range(1, days_in_month+1)]
         
         if cycle_type == 'weekly':
-            return get_weekdays_in_month(year, month, self.task.weekday)
+            dates = get_weekdays_in_month(year, month, self.task.weekday)
         
         if cycle_type == 'monthly_fixed':
             day = self.task.day_of_month
             try:
-                return [date(year, month, day)]
+                dates = [date(year, month, day)]
             except ValueError:
-                return []  # Invalid day for this month (e.g., Feb 30)
+                dates = []  # Invalid day for this month (e.g., Feb 30)
         
         if cycle_type == 'monthly_range':
             start = self.task.range_start
@@ -151,14 +162,12 @@ class TaskScheduler:
                         continue
             else:
                 # Cross-month: generate two intervals
-                # Interval 1: start to end of current month
                 days_in_month = calendar.monthrange(year, month)[1]
                 for day in range(start, days_in_month+1):
                     try:
                         dates.append(date(year, month, day))
                     except ValueError:
                         continue
-                # Interval 2: start of next month to end
                 if month == 12:
                     next_month = 1
                     next_year = year+1
@@ -170,14 +179,16 @@ class TaskScheduler:
                         dates.append(date(next_year, next_month, day))
                     except ValueError:
                         continue
-            return dates
         
         if cycle_type == 'monthly_n_times':
             # All matching weekdays in month, limited by quota
-            all_dates = get_weekdays_in_month(year, month, self.task.weekday)
-            return all_dates  # Quota applied elsewhere
+            dates = get_weekdays_in_month(year, month, self.task.weekday)
         
-        return []
+        # Filter by end_date if set
+        if self.end_date:
+            dates = [d for d in dates if d <= self.end_date]
+        
+        return dates
 
     def get_pending_dates_in_month(self, year: int, month: int, existing_occurrences: List[Tuple[date, str]]) -> List[date]:
         """Return dates in month that should be pending (not already completed/skipped)."""
