@@ -66,6 +66,15 @@ python3 skills/chronos/scripts/todo.py add "买牛奶" --category 生活
 python3 skills/chronos/scripts/todo.py complete FIN-123  # 周期任务 occurrence
 python3 skills/chronos/scripts/todo.py complete 45      # 普通任务 ID
 
+# 跳过任务（不影响配额）
+python3 skills/chronos/scripts/todo.py skip FIN-123     # 周期任务
+python3 skills/chronos/scripts/todo.py skip 45         # 普通任务
+
+# 自然语言支持
+python3 skills/chronos/scripts/todo.py "跳过 FIN-123"
+python3 skills/chronos/scripts/todo.py "跳过 45"
+python3 skills/chronos/scripts/todo.py "查询待办"
+
 # 查看详情
 python3 skills/chronos/scripts/todo.py show FIN-123
 ```
@@ -83,13 +92,28 @@ python3 skills/chronos/scripts/todo.py show FIN-123
 ### entries + groups
 - 旧表，用于一次性任务，保留兼容
 
-## Migration
+## Features
 
-旧 `financial_activities` 和 `financial_occurrences` 数据已自动迁移到新表。旧表已删除。
+### Skip Functionality
+- **Skip command**: Use `skip` to mark tasks as skipped without affecting quotas
+- **Natural language**: Say "跳过 FIN-123" or "skip 45"
+- **Quota safe**: Skipped occurrences do NOT count toward monthly_n_times quotas
+- **Visual indicator**: Skipped tasks show as "已跳过" in list view
+- **Cron cleanup**: Skipped tasks automatically remove their reminder cron jobs
+- **Reversible**: You can complete a skipped task by using `complete` (after manually changing status back to pending if needed)
 
-## Notes
+### Smart Quotas
+- 仅 `completed` 计数，`skip` 不计
+- 配额用满后自动完成当月剩余活动日
+- 每月1号自动重置计数器
 
-- 所有时间基于 `Asia/Shanghai` 时区
-- Cron 提醒转换为 UTC 后提交给 Gateway
-- `todo.py list` 调用 `--ensure-today` 轻量生成（不安排 cron），完整 cron 由每日 manager 负责
-- 双环学习集成在 `periodic_task_manager.py` 的关键操作中
+### Automatic Reminders
+- Cron 任务自动生成（未来事件）
+- 每日自动清理过期 cron
+- 时间已过则跳过（避免错误）
+
+### Unified View
+- `todo.py list`：合并显示周期任务和普通任务
+- `todo.py add`：智能路由（周期任务 → manager，一次性 → entries）
+- `todo.py complete`：完成单个 occurrence 或普通任务
+- `todo.py show`：查看详情
