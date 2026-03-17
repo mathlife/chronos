@@ -121,8 +121,8 @@ class PeriodicTaskManager:
                     "--at", now_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
                     "--system-event", message_text,
                     "--session", "main",
-                    "--delivery-mode", "announce",
-                    "--delivery-channel", "last"
+                    "--announce",
+                    "--channel", "last"
                 ], capture_output=True, text=True, timeout=10)
             except Exception as e:
                 print(f"Failed to send immediate reminder: {e}")
