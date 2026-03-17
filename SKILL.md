@@ -1,7 +1,7 @@
 ---
 name: chronos
 description: 通用周期任务管理器 - 支持6种周期类型、每月N次配额、自动cron、统一视图，适用于所有定时任务场景
-version: 1.4.0
+version: 1.4.1
 metadata: {"openclaw":{"emoji":"⏰","requires":{"bins":["sqlite3","openclaw"]}}}
 user-invocable: true
 ---
