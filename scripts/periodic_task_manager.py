@@ -122,7 +122,7 @@ class PeriodicTaskManager:
                     "--message", message_text,
                     "--session", "isolated",
                     "--announce",
-                    "--channel", "last"
+                    "--to", "58689511"  # TODO: Make this configurable
                 ], capture_output=True, text=True, timeout=10)
             except Exception as e:
                 print(f"Failed to send immediate reminder: {e}")
