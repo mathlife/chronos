@@ -1,7 +1,7 @@
 ---
 name: chronos
 description: 通用周期任务管理器 - 支持6种周期类型、每月N次配额、自动cron、统一视图，适用于所有定时任务场景
-version: 1.3.6
+version: 1.4.0
 metadata: {"openclaw":{"emoji":"⏰","requires":{"bins":["sqlite3","openclaw"]}}}
 user-invocable: true
 ---
@@ -38,6 +38,13 @@ user-invocable: true
 - `todo.py add`：智能路由（周期任务 → manager，一次性 → entries）
 - `todo.py complete`：完成单个 occurrence 或普通任务
 - `todo.py show`：查看详情
+
+## Configuration
+
+- **Chat ID**: Reminder notifications target a specific chat. Configure via:
+  - Environment variable: `CHRONOS_CHAT_ID`
+  - Config file: `~/.config/chronos/config.json` with field `chat_id`
+  - Default: `58689511` (fallback)
 
 ## Usage
 
