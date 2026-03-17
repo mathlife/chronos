@@ -17,6 +17,7 @@ from core.db import DB, db_commit, clear_task_cache, get_periodic_tasks, get_per
 from core.scheduler import TaskScheduler, to_shanghai_date
 from core.learning import LearningContext
 from core.models import PeriodicTask
+from core.config import get_chat_id
 
 SHANGHAI_TZ = ZoneInfo('Asia/Shanghai')
 
@@ -115,6 +116,7 @@ class PeriodicTaskManager:
             message_text = f"⏰ 周期任务提醒（补发）：{task_name} 已到时间（{occ_date} {time_of_day}）"
             try:
                 # Send immediate system event
+                chat_id = get_chat_id()
                 subprocess.run([
                     "openclaw", "cron", "add",
                     "--name", f"reminder_immediate_{task_id}_{occ_date.strftime('%Y%m%d%H%M')}",
@@ -122,7 +124,7 @@ class PeriodicTaskManager:
                     "--message", message_text,
                     "--session", "isolated",
                     "--announce",
-                    "--to", "58689511"  # TODO: Make this configurable
+                    "--to", chat_id
                 ], capture_output=True, text=True, timeout=10)
             except Exception as e:
                 print(f"Failed to send immediate reminder: {e}")

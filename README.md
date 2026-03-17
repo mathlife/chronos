@@ -107,6 +107,61 @@ python3 skills/chronos/scripts/todo.py add "月度总结" \
   --category "工作"
 ```
 
+## Configuration
+
+Chronos supports configurable reminder destinations via chat ID.
+
+### Chat ID Configuration
+
+Reminder notifications are sent to a specific chat. Configure using:
+
+**1. Environment variable (highest priority):**
+```bash
+export CHRONOS_CHAT_ID="your_chat_id_here"
+```
+
+**2. Config file (fallback):**
+Create `~/.config/chronos/config.json`:
+```json
+{
+  "chat_id": "your_chat_id_here"
+}
+```
+
+**3. Default:** If neither is set, uses `YOUR_CHAT_ID` (original hardcoded value).
+
+### Priority Order
+
+1. `CHRONOS_CHAT_ID` environment variable
+2. `~/.config/chronos/config.json` → `chat_id` field
+3. Default: `YOUR_CHAT_ID`
+
+### Examples
+
+```bash
+# Method 1: Environment variable (temporary, session-only)
+CHRONOS_CHAT_ID="12345678" python3 skills/chronos/scripts/todo.py add "每日签到" --cycle-type daily --time "09:00"
+
+# Method 2: Persistent environment variable (add to ~/.bashrc or ~/.profile)
+export CHRONOS_CHAT_ID="12345678"
+
+# Method 3: Config file (persistent, no shell config needed)
+mkdir -p ~/.config/chronos
+cat > ~/.config/chronos/config.json <<EOF
+{
+  "chat_id": "12345678"
+}
+EOF
+```
+
+## Testing Configuration
+
+Run the included test suite to verify configuration works:
+
+```bash
+python3 skills/chronos/scripts/test_config.py
+```
+
 ## Architecture
 
 - `core/`: 核心模块（数据库、调度、模型、双环学习）
