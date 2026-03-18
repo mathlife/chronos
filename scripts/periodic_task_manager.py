@@ -135,6 +135,7 @@ class PeriodicTaskManager:
         job_name = f"task_reminder_{task_id}_{occ_date.strftime('%Y%m%d')}"
         message_text = f"⏰ 周期任务提醒（提前5分钟）：{task_name} 即将开始"
         
+        chat_id = get_chat_id()
         cmd = [
             "openclaw", "cron", "add",
             "--name", job_name,
@@ -142,7 +143,7 @@ class PeriodicTaskManager:
             "--message", message_text,
             "--session", "isolated",
             "--announce",
-            "--channel", "last"
+            "--to", chat_id
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
