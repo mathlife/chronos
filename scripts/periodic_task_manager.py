@@ -11,7 +11,7 @@ import sqlite3
 import subprocess
 import json
 import re
-from datetime import datetime, timedelta, date, timezone
+from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from typing import Optional
 
@@ -24,10 +24,7 @@ from core.paths import OPENCLAW_BIN
 
 CYCLE_TYPES = ['once', 'daily', 'weekly', 'monthly_fixed', 'monthly_range', 'monthly_n_times']
 
-try:
-    SHANGHAI_TZ = ZoneInfo('Asia/Shanghai')
-except Exception:
-    SHANGHAI_TZ = timezone(timedelta(hours=8), name='Asia/Shanghai')
+SHANGHAI_TZ = ZoneInfo('Asia/Shanghai')
 
 
 def parse_time_of_day(value: str) -> str:

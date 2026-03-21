@@ -1,14 +1,11 @@
 """Double-Loop Learning integration."""
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .paths import PYTHON_BIN, get_prediction_logger_path
 
-try:
-    SHANGHAI_TZ = ZoneInfo('Asia/Shanghai')
-except Exception:
-    SHANGHAI_TZ = timezone(timedelta(hours=8), name='Asia/Shanghai')
+SHANGHAI_TZ = ZoneInfo('Asia/Shanghai')
 
 def now_shanghai() -> datetime:
     return datetime.now(SHANGHAI_TZ)

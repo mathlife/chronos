@@ -1,6 +1,6 @@
 """Scheduling logic: date matching, occurrence generation, quota management."""
 import calendar
-from datetime import datetime, timedelta, date, timezone
+from datetime import datetime, timedelta, date
 from typing import List, Optional, Tuple
 from zoneinfo import ZoneInfo
 from functools import lru_cache
@@ -8,10 +8,7 @@ import re
 
 from .models import PeriodicTask
 
-try:
-    SHANGHAI_TZ = ZoneInfo('Asia/Shanghai')
-except Exception:
-    SHANGHAI_TZ = timezone(timedelta(hours=8), name='Asia/Shanghai')
+SHANGHAI_TZ = ZoneInfo('Asia/Shanghai')
 
 def to_shanghai_date(dt: Optional[datetime] = None) -> date:
     """Convert datetime to Shanghai date (today if None)."""

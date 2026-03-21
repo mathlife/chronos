@@ -3,23 +3,13 @@
 import os
 import sys
 import json
-import shutil
-import uuid
+import tempfile
 from pathlib import Path
 
 # Add skill to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.config import get_chat_id, get_config
-
-TMP_ROOT = Path(__file__).resolve().parent.parent / ".tmp_tests"
-TMP_ROOT.mkdir(exist_ok=True)
-
-
-def make_temp_config_dir() -> Path:
-    path = TMP_ROOT / f"tmp_{uuid.uuid4().hex}"
-    path.mkdir(parents=True, exist_ok=False)
-    return path
 
 
 def set_config_path(config_file: Path) -> str | None:
@@ -41,17 +31,16 @@ def test_default():
     if 'CHRONOS_CHAT_ID' in os.environ:
         del os.environ['CHRONOS_CHAT_ID']
     
-    tmpdir = make_temp_config_dir()
-    original_config_path = set_config_path(tmpdir / "config.json")
-    try:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        original_config_path = set_config_path(Path(tmpdir) / "config.json")
         try:
-            get_chat_id()
-            raise AssertionError("Expected get_chat_id() to raise ValueError")
-        except ValueError:
-            print("[ok] Missing chat_id now raises a clear error")
-    finally:
-        restore_config_path(original_config_path)
-        shutil.rmtree(tmpdir, ignore_errors=True)
+            try:
+                get_chat_id()
+                raise AssertionError("Expected get_chat_id() to raise ValueError")
+            except ValueError:
+                print("[ok] Missing chat_id now raises a clear error")
+        finally:
+            restore_config_path(original_config_path)
 
 
 def test_env_override():
@@ -70,22 +59,21 @@ def test_config_file():
         del os.environ['CHRONOS_CHAT_ID']
     
     # Create temp config
-    tmpdir = make_temp_config_dir()
-    config_file = tmpdir / "config.json"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_file = Path(tmpdir) / "config.json"
         
-    test_chat_id = "777666555"
-    with open(config_file, 'w', encoding='utf-8') as f:
-        json.dump({"chat_id": test_chat_id}, f)
+        test_chat_id = "777666555"
+        with open(config_file, 'w', encoding='utf-8') as f:
+            json.dump({"chat_id": test_chat_id}, f)
         
-    original_config_path = set_config_path(config_file)
-    
-    try:
-        result = get_chat_id()
-        assert result == test_chat_id, f"Expected {test_chat_id}, got {result}"
-        print("[ok] Config file is read correctly")
-    finally:
-        restore_config_path(original_config_path)
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        original_config_path = set_config_path(config_file)
+        
+        try:
+            result = get_chat_id()
+            assert result == test_chat_id, f"Expected {test_chat_id}, got {result}"
+            print("[ok] Config file is read correctly")
+        finally:
+            restore_config_path(original_config_path)
 
 
 def test_partial_config():
@@ -93,23 +81,22 @@ def test_partial_config():
     if 'CHRONOS_CHAT_ID' in os.environ:
         del os.environ['CHRONOS_CHAT_ID']
     
-    tmpdir = make_temp_config_dir()
-    config_file = tmpdir / "config.json"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_file = Path(tmpdir) / "config.json"
         
-    with open(config_file, 'w', encoding='utf-8') as f:
-        json.dump({"other_key": "value"}, f)
+        with open(config_file, 'w', encoding='utf-8') as f:
+            json.dump({"other_key": "value"}, f)
         
-    original_config_path = set_config_path(config_file)
-    
-    try:
+        original_config_path = set_config_path(config_file)
+        
         try:
-            get_chat_id()
-            raise AssertionError("Expected missing chat_id to raise ValueError")
-        except ValueError:
-            print("[ok] Missing chat_id in config raises ValueError")
-    finally:
-        restore_config_path(original_config_path)
-        shutil.rmtree(tmpdir, ignore_errors=True)
+            try:
+                get_chat_id()
+                raise AssertionError("Expected missing chat_id to raise ValueError")
+            except ValueError:
+                print("[ok] Missing chat_id in config raises ValueError")
+        finally:
+            restore_config_path(original_config_path)
 
 
 def test_get_config():
@@ -117,23 +104,22 @@ def test_get_config():
     if 'CHRONOS_CHAT_ID' in os.environ:
         del os.environ['CHRONOS_CHAT_ID']
     
-    tmpdir = make_temp_config_dir()
-    config_file = tmpdir / "config.json"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_file = Path(tmpdir) / "config.json"
         
-    test_chat_id = "111222333"
-    with open(config_file, 'w', encoding='utf-8') as f:
-        json.dump({"chat_id": test_chat_id, "custom_key": "custom_value"}, f)
+        test_chat_id = "111222333"
+        with open(config_file, 'w', encoding='utf-8') as f:
+            json.dump({"chat_id": test_chat_id, "custom_key": "custom_value"}, f)
         
-    original_config_path = set_config_path(config_file)
-    
-    try:
-        config = get_config()
-        assert config['chat_id'] == test_chat_id, f"Chat ID mismatch"
-        assert config['custom_key'] == "custom_value", f"Custom key missing"
-        print("[ok] get_config returns merged configuration")
-    finally:
-        restore_config_path(original_config_path)
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        original_config_path = set_config_path(config_file)
+        
+        try:
+            config = get_config()
+            assert config['chat_id'] == test_chat_id, f"Chat ID mismatch"
+            assert config['custom_key'] == "custom_value", f"Custom key missing"
+            print("[ok] get_config returns merged configuration")
+        finally:
+            restore_config_path(original_config_path)
 
 
 if __name__ == "__main__":
