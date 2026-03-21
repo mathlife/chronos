@@ -1,5 +1,6 @@
 """Main periodic task manager using the new core modules."""
 import sys
+import argparse
 from pathlib import Path
 
 # Add core module to path
@@ -9,7 +10,8 @@ sys.path.insert(0, str(SKILL_DIR))
 import sqlite3
 import subprocess
 import json
-from datetime import datetime, timedelta, date
+import re
+from datetime import datetime, timedelta, date, timezone
 from zoneinfo import ZoneInfo
 from typing import Optional
 
@@ -18,8 +20,73 @@ from core.scheduler import TaskScheduler, to_shanghai_date
 from core.learning import LearningContext
 from core.models import PeriodicTask
 from core.config import get_chat_id
+from core.paths import OPENCLAW_BIN
 
-SHANGHAI_TZ = ZoneInfo('Asia/Shanghai')
+CYCLE_TYPES = ['once', 'daily', 'weekly', 'monthly_fixed', 'monthly_range', 'monthly_n_times']
+
+try:
+    SHANGHAI_TZ = ZoneInfo('Asia/Shanghai')
+except Exception:
+    SHANGHAI_TZ = timezone(timedelta(hours=8), name='Asia/Shanghai')
+
+
+def parse_time_of_day(value: str) -> str:
+    match = re.fullmatch(r'(\d{1,2}):(\d{2})', value.strip())
+    if not match:
+        raise argparse.ArgumentTypeError("time must be HH:MM")
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise argparse.ArgumentTypeError("time must be HH:MM (00:00-23:59)")
+    return f"{hour:02d}:{minute:02d}"
+
+
+def validate_add_params(args: argparse.Namespace) -> None:
+    if args.weekday is not None and (args.weekday < 0 or args.weekday > 6):
+        raise ValueError("weekday must be 0-6 (Mon=0)")
+    if args.day_of_month is not None and (args.day_of_month < 1 or args.day_of_month > 31):
+        raise ValueError("day must be 1-31")
+    if args.range_start is not None and (args.range_start < 1 or args.range_start > 31):
+        raise ValueError("range-start must be 1-31")
+    if args.range_end is not None and (args.range_end < 1 or args.range_end > 31):
+        raise ValueError("range-end must be 1-31")
+    if args.n_per_month is not None and args.n_per_month <= 0:
+        raise ValueError("n-per-month must be > 0")
+    if args.end_date:
+        try:
+            date.fromisoformat(args.end_date)
+        except ValueError as exc:
+            raise ValueError("end-date must be YYYY-MM-DD") from exc
+
+    if args.cycle_type == 'weekly' and args.weekday is None:
+        raise ValueError("weekly tasks require --weekday")
+    if args.cycle_type == 'monthly_fixed' and args.day_of_month is None:
+        raise ValueError("monthly_fixed tasks require --day")
+    if args.cycle_type == 'monthly_range' and (args.range_start is None or args.range_end is None):
+        raise ValueError("monthly_range tasks require --range-start and --range-end")
+    if args.cycle_type == 'monthly_n_times' and (args.weekday is None or args.n_per_month is None):
+        raise ValueError("monthly_n_times tasks require --weekday and --n-per-month")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Chronos periodic task manager")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--add", action="store_true", help="Add a periodic task")
+    group.add_argument("--complete-activity", type=int, help="Complete activity by task id")
+    group.add_argument("--ensure-today", action="store_true", help="Ensure today's occurrences")
+
+    parser.add_argument("--name")
+    parser.add_argument("--category", default="Inbox")
+    parser.add_argument("--cycle-type", default="once", choices=CYCLE_TYPES)
+    parser.add_argument("--time", dest="time_of_day", type=parse_time_of_day, default="09:00")
+    parser.add_argument("--weekday", type=int)
+    parser.add_argument("--day", dest="day_of_month", type=int)
+    parser.add_argument("--range-start", type=int)
+    parser.add_argument("--range-end", type=int)
+    parser.add_argument("--n-per-month", type=int)
+    parser.add_argument("--end-date")
+
+    return parser
 
 class PeriodicTaskManager:
     """Manages periodic tasks: scheduling, completion, cleanup."""
@@ -89,6 +156,12 @@ class PeriodicTaskManager:
         if not row:
             return None
         task_name = row[0]
+
+        try:
+            chat_id = get_chat_id()
+        except ValueError as exc:
+            print(f"Chronos chat_id not configured: {exc}")
+            return None
         
         # Parse time_of_day and subtract 5 minutes for reminder
         hour, minute = map(int, time_of_day.split(':'))
@@ -116,9 +189,8 @@ class PeriodicTaskManager:
             message_text = f"⏰ 周期任务提醒（补发）：{task_name} 已到时间（{occ_date} {time_of_day}）"
             try:
                 # Send immediate system event
-                chat_id = get_chat_id()
                 subprocess.run([
-                    "openclaw", "cron", "add",
+                    OPENCLAW_BIN, "cron", "add",
                     "--name", f"reminder_immediate_{task_id}_{occ_date.strftime('%Y%m%d%H%M')}",
                     "--at", now_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
                     "--message", message_text,
@@ -126,7 +198,7 @@ class PeriodicTaskManager:
                     "--announce",
                     "--to", chat_id
                 ], capture_output=True, text=True, timeout=10)
-            except Exception as e:
+            except (OSError, subprocess.SubprocessError) as e:
                 print(f"Failed to send immediate reminder: {e}")
             return None  # No persistent cron job
         
@@ -135,9 +207,8 @@ class PeriodicTaskManager:
         job_name = f"task_reminder_{task_id}_{occ_date.strftime('%Y%m%d')}"
         message_text = f"⏰ 周期任务提醒（提前5分钟）：{task_name} 即将开始"
         
-        chat_id = get_chat_id()
         cmd = [
-            "openclaw", "cron", "add",
+            OPENCLAW_BIN, "cron", "add",
             "--name", job_name,
             "--at", iso_time,
             "--message", message_text,
@@ -145,7 +216,11 @@ class PeriodicTaskManager:
             "--announce",
             "--to", chat_id
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as e:
+            print(f"Failed to schedule cron: {e}")
+            return None
         if result.returncode == 0:
             return job_name
         else:
@@ -179,8 +254,10 @@ class PeriodicTaskManager:
                     continue
             
             # Check if reminder already scheduled
-            cur = self.db.execute("SELECT reminder_job_id FROM periodic_occurrences WHERE id = ?", (occ_id,))
-            job_name = cur.fetchone()[0]
+            cur = self.db.execute("SELECT status, reminder_job_id FROM periodic_occurrences WHERE id = ?", (occ_id,))
+            status, job_name = cur.fetchone()
+            if status not in ('pending', 'reminded'):
+                continue
             if not job_name:
                 job_name = self.schedule_reminder_cron(task.id, today, task.time_of_day)
                 if job_name:
@@ -203,7 +280,7 @@ class PeriodicTaskManager:
         for occ_id, job_name in jobs:
             try:
                 result = subprocess.run(
-                    ["openclaw", "cron", "remove", job_name],
+                    [OPENCLAW_BIN, "cron", "remove", job_name],
                     capture_output=True, text=True, timeout=10
                 )
                 if result.returncode == 0:
@@ -248,7 +325,10 @@ class PeriodicTaskManager:
                              f"Complete all pending for task {task_id} up to today",
                              confidence="H"):
             today = to_shanghai_date(as_of)
-            task = PeriodicTask(**(get_periodic_task(task_id) or {}))
+            task_dict = get_periodic_task(task_id)
+            if not task_dict:
+                return 0
+            task = PeriodicTask(**task_dict)
             affected = 0
             
             # 1. Complete all pending up to today (including today)
@@ -287,7 +367,7 @@ class PeriodicTaskManager:
             for job_name in job_names:
                 try:
                     subprocess.run(
-                        ["openclaw", "cron", "remove", job_name],
+                        [OPENCLAW_BIN, "cron", "remove", job_name],
                         capture_output=True, text=True, timeout=10
                     )
                 except:
@@ -329,53 +409,51 @@ class PeriodicTaskManager:
             return scheduled + cleaned
 
 def main():
-    import sys
     manager = PeriodicTaskManager()
     try:
-        if len(sys.argv) > 1 and sys.argv[1] == '--add':
-            # Parse args
-            args = sys.argv[2:]
-            params = {}
-            i = 0
-            while i < len(args):
-                if args[i] == '--name' and i + 1 < len(args):
-                    params['name'] = args[i+1]; i += 2
-                elif args[i] == '--category' and i + 1 < len(args):
-                    params['category'] = args[i+1]; i += 2
-                elif args[i] == '--cycle-type' and i + 1 < len(args):
-                    params['cycle_type'] = args[i+1]; i += 2
-                elif args[i] == '--time' and i + 1 < len(args):
-                    params['time_of_day'] = args[i+1]; i += 2
-                elif args[i] == '--weekday' and i + 1 < len(args):
-                    params['weekday'] = int(args[i+1]); i += 2
-                elif args[i] == '--day' and i + 1 < len(args):
-                    params['day_of_month'] = int(args[i+1]); i += 2
-                elif args[i] == '--range-start' and i + 1 < len(args):
-                    params['range_start'] = int(args[i+1]); i += 2
-                elif args[i] == '--range-end' and i + 1 < len(args):
-                    params['range_end'] = int(args[i+1]); i += 2
-                elif args[i] == '--n-per-month' and i + 1 < len(args):
-                    params['n_per_month'] = int(args[i+1]); i += 2
-                elif args[i] == '--end-date' and i + 1 < len(args):
-                    params['end_date'] = args[i+1]; i += 2
-                else:
-                    i += 1
-            
+        parser = build_parser()
+        args = parser.parse_args()
+
+        if args.add:
+            if not args.name:
+                print("Missing required --name for --add")
+                sys.exit(2)
+            try:
+                validate_add_params(args)
+            except ValueError as exc:
+                print(f"参数错误：{exc}")
+                sys.exit(2)
+
+            params = {
+                'name': args.name,
+                'category': args.category,
+                'cycle_type': args.cycle_type,
+                'time_of_day': args.time_of_day,
+            }
+            if args.weekday is not None:
+                params['weekday'] = args.weekday
+            if args.day_of_month is not None:
+                params['day_of_month'] = args.day_of_month
+            if args.range_start is not None:
+                params['range_start'] = args.range_start
+            if args.range_end is not None:
+                params['range_end'] = args.range_end
+            if args.n_per_month is not None:
+                params['n_per_month'] = args.n_per_month
+            if args.end_date is not None:
+                params['end_date'] = args.end_date
+
             activity_id = manager.add_activity(**params)
             print(f"✅ Added task {activity_id}: {params.get('name')}")
-        
-        elif len(sys.argv) > 1 and sys.argv[1] == '--complete-activity':
-            if len(sys.argv) > 2:
-                task_id = int(sys.argv[2])
-                affected = manager.complete_activity_cycle(task_id)
-                print(f"Completed {affected} occurrences for task {task_id}")
-            else:
-                print("Usage: --complete-activity <task_id>")
-        
-        elif len(sys.argv) > 1 and sys.argv[1] == '--ensure-today':
+
+        elif args.complete_activity is not None:
+            affected = manager.complete_activity_cycle(args.complete_activity)
+            print(f"Completed {affected} occurrences for task {args.complete_activity}")
+
+        elif args.ensure_today:
             count = manager.ensure_today_occurrences()
             print(f"Ensured {count} occurrences for today")
-        
+
         else:
             result = manager.run_daily()
             print(f"Periodic task manager: processed {result} items")

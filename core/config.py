@@ -2,7 +2,14 @@
 import os
 import json
 from pathlib import Path
-from typing import Optional
+
+
+def get_config_path() -> Path:
+    """Return the configuration file path."""
+    configured = os.getenv("CHRONOS_CONFIG_PATH")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".config" / "chronos" / "config.json"
 
 
 def get_chat_id() -> str:
@@ -10,7 +17,7 @@ def get_chat_id() -> str:
     
     Priority:
     1. Environment variable: CHRONOS_CHAT_ID
-    2. Config file: ~/.config/chronos/config.json (field: chat_id)
+    2. Config file: ~/.config/chronos/config.json or CHRONOS_CONFIG_PATH (field: chat_id)
     3. Raises error if not configured
     
     Returns:
@@ -25,7 +32,7 @@ def get_chat_id() -> str:
         return chat_id.strip()
     
     # 2. Check config file
-    config_path = Path.home() / ".config" / "chronos" / "config.json"
+    config_path = get_config_path()
     if config_path.exists():
         try:
             with open(config_path, 'r') as f:
@@ -39,7 +46,8 @@ def get_chat_id() -> str:
     raise ValueError(
         "CHRONOS_CHAT_ID not configured. Please set:\n"
         "  1. Environment variable: export CHRONOS_CHAT_ID='your_chat_id'\n"
-        "  2. Or config file: echo '{\"chat_id\": \"your_chat_id\"}' > ~/.config/chronos/config.json"
+        "  2. Or config file: echo '{\"chat_id\": \"your_chat_id\"}' > ~/.config/chronos/config.json\n"
+        "     (or set CHRONOS_CONFIG_PATH to a custom location)"
     )
 
 
@@ -50,7 +58,7 @@ def get_config() -> dict:
     }
     
     # Load additional config file if exists
-    config_path = Path.home() / ".config" / "chronos" / "config.json"
+    config_path = get_config_path()
     if config_path.exists():
         try:
             with open(config_path, 'r') as f:

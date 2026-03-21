@@ -1,6 +1,6 @@
 """Scheduling logic: date matching, occurrence generation, quota management."""
 import calendar
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from typing import List, Optional, Tuple
 from zoneinfo import ZoneInfo
 from functools import lru_cache
@@ -8,7 +8,10 @@ import re
 
 from .models import PeriodicTask
 
-SHANGHAI_TZ = ZoneInfo('Asia/Shanghai')
+try:
+    SHANGHAI_TZ = ZoneInfo('Asia/Shanghai')
+except Exception:
+    SHANGHAI_TZ = timezone(timedelta(hours=8), name='Asia/Shanghai')
 
 def to_shanghai_date(dt: Optional[datetime] = None) -> date:
     """Convert datetime to Shanghai date (today if None)."""
@@ -29,7 +32,7 @@ def is_same_month(d1: date, d2: date) -> bool:
 
 @lru_cache(maxsize=128)
 def get_weekdays_in_month(year: int, month: int, weekday: int) -> List[date]:
-    """Return all dates in month matching weekday (0=Sun)."""
+    """Return all dates in month matching weekday (0=Monday)."""
     first_day = date(year, month, 1)
     if month == 12:
         last_day = date(year+1, 1, 1) - timedelta(days=1)
@@ -70,15 +73,21 @@ class TaskScheduler:
             return True
         
         if self.task.cycle_type == 'weekly':
+            if self.task.weekday is None:
+                return False
             return today.weekday() == self.task.weekday
         
         if self.task.cycle_type == 'monthly_fixed':
+            if self.task.day_of_month is None:
+                return False
             return today.day == self.task.day_of_month
         
         if self.task.cycle_type == 'monthly_range':
             return self._in_monthly_range(today)
         
         if self.task.cycle_type == 'monthly_n_times':
+            if self.task.weekday is None:
+                return False
             if today.weekday() != self.task.weekday:
                 return False
             # Check quota
@@ -131,58 +140,48 @@ class TaskScheduler:
     def get_occurrences_for_month(self, year: int, month: int) -> List[date]:
         """Generate all occurrence dates for the given month, respecting end_date."""
         cycle_type = self.task.cycle_type
+        dates: List[date] = []
         
         if cycle_type == 'daily':
             # Every day of the month
             days_in_month = calendar.monthrange(year, month)[1]
             dates = [date(year, month, d) for d in range(1, days_in_month+1)]
         
-        if cycle_type == 'weekly':
+        elif cycle_type == 'weekly':
+            if self.task.weekday is None:
+                return []
             dates = get_weekdays_in_month(year, month, self.task.weekday)
         
-        if cycle_type == 'monthly_fixed':
+        elif cycle_type == 'monthly_fixed':
             day = self.task.day_of_month
+            if day is None:
+                return []
             try:
                 dates = [date(year, month, day)]
             except ValueError:
                 dates = []  # Invalid day for this month (e.g., Feb 30)
         
-        if cycle_type == 'monthly_range':
+        elif cycle_type == 'monthly_range':
             start = self.task.range_start
             end = self.task.range_end
             if start is None or end is None:
                 return []
-            
-            dates = []
-            if start <= end:
-                for day in range(start, end+1):
-                    try:
-                        dates.append(date(year, month, day))
-                    except ValueError:
-                        continue
-            else:
-                # Cross-month: generate two intervals
-                days_in_month = calendar.monthrange(year, month)[1]
-                for day in range(start, days_in_month+1):
-                    try:
-                        dates.append(date(year, month, day))
-                    except ValueError:
-                        continue
-                if month == 12:
-                    next_month = 1
-                    next_year = year+1
-                else:
-                    next_month = month+1
-                    next_year = year
-                for day in range(1, end+1):
-                    try:
-                        dates.append(date(next_year, next_month, day))
-                    except ValueError:
-                        continue
-        
-        if cycle_type == 'monthly_n_times':
+
+            days_in_month = calendar.monthrange(year, month)[1]
+            dates = [
+                current
+                for current in (date(year, month, day) for day in range(1, days_in_month + 1))
+                if self._in_monthly_range(current)
+            ]
+
+        elif cycle_type == 'monthly_n_times':
+            if self.task.weekday is None:
+                return []
             # All matching weekdays in month, limited by quota
             dates = get_weekdays_in_month(year, month, self.task.weekday)
+
+        else:
+            return []
         
         # Filter by end_date if set
         if self.end_date:

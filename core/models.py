@@ -9,7 +9,7 @@ class PeriodicTask:
     name: str
     category: str = 'Inbox'
     cycle_type: str = 'once'  # once|daily|weekly|monthly_fixed|monthly_range|monthly_n_times
-    weekday: Optional[int] = None  # 0-6 (0=Sunday)
+    weekday: Optional[int] = None  # 0-6 (0=Monday, Python weekday)
     day_of_month: Optional[int] = None  # 1-31
     range_start: Optional[int] = None
     range_end: Optional[int] = None
