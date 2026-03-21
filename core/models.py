@@ -20,6 +20,13 @@ class PeriodicTask:
     is_active: bool = True
     count_current_month: int = 0
     end_date: Optional[str] = None  # YYYY-MM-DD, NULL means no end
+    reminder_template: Optional[str] = None  # Custom reminder message template
+    # Monitoring fields (optional, for backward compatibility)
+    last_reminder_error: Optional[str] = None
+    reminder_error_count: int = 0
+    last_reminder_error_at: Optional[str] = None
+    # Additional fields that may exist in DB
+    dates_list: Optional[str] = None
     created_at: str = field(default_factory=lambda: date.today().isoformat())
     updated_at: str = field(default_factory=lambda: date.today().isoformat())
 

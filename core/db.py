@@ -67,3 +67,23 @@ def clear_task_cache():
     """Clear task cache (called after updates)."""
     get_periodic_tasks.cache_clear()
     get_periodic_task.cache_clear()
+
+def ensure_schema():
+    """Ensure database schema has all required columns."""
+    db = DB()
+    cur = db.execute("PRAGMA table_info(periodic_tasks)")
+    columns = {row[1] for row in cur.fetchall()}  # column name at index 1
+
+    # Add reminder_template column if missing
+    if 'reminder_template' not in columns:
+        db.execute("ALTER TABLE periodic_tasks ADD COLUMN reminder_template TEXT")
+        db.commit()
+        print("✓ Added reminder_template column to periodic_tasks")
+
+    # Add error tracking columns for monitoring
+    if 'last_reminder_error' not in columns:
+        db.execute("ALTER TABLE periodic_tasks ADD COLUMN last_reminder_error TEXT")
+        db.execute("ALTER TABLE periodic_tasks ADD COLUMN reminder_error_count INTEGER DEFAULT 0")
+        db.execute("ALTER TABLE periodic_tasks ADD COLUMN last_reminder_error_at TIMESTAMP")
+        db.commit()
+        print("✓ Added error tracking columns to periodic_tasks")
