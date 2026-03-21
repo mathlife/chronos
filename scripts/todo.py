@@ -80,6 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.add_argument("--range-end", type=int)
     add_parser.add_argument("--n-per-month", type=int)
     add_parser.add_argument("--end-date")
+    add_parser.add_argument("--reminder-template")
 
     complete_parser = subparsers.add_parser("complete", help="Complete a task")
     complete_parser.add_argument("identifier")
@@ -364,6 +365,8 @@ def cmd_add(text, category='Inbox', cycle_type='once', **kwargs):
             args.extend(['--n-per-month', str(kwargs['n_per_month'])])
         if 'end_date' in kwargs:
             args.extend(['--end-date', kwargs['end_date']])
+        if 'reminder_template' in kwargs:
+            args.extend(['--reminder-template', kwargs['reminder_template']])
         
         result = subprocess.run(args, capture_output=True, text=True)
         if result.returncode == 0:
@@ -631,6 +634,8 @@ def main():
                 kwargs['n_per_month'] = args.n_per_month
             if args.end_date is not None:
                 kwargs['end_date'] = args.end_date
+            if args.reminder_template is not None:
+                kwargs['reminder_template'] = args.reminder_template
 
             cmd_add(args.name, **kwargs)
         elif args.command == 'skip':

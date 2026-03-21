@@ -36,7 +36,8 @@ python3 skills/chronos/scripts/todo.py add "任务名" \
   [--weekday 0-6 (Mon=0, Sun=6)] \
   [--day 1-31] \
   [--range-start 1-31 --range-end 1-31] \
-  [--n-per-month N]
+  [--n-per-month N] \
+  [--reminder-template "Message with {name} {date} {time} {when}"]
 
 # 完成任务
 python3 skills/chronos/scripts/todo.py complete <ID|FIN-occ_id>

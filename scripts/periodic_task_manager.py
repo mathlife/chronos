@@ -85,6 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--range-end", type=int)
     parser.add_argument("--n-per-month", type=int)
     parser.add_argument("--end-date")
+    parser.add_argument("--reminder-template")
 
     return parser
 
@@ -102,8 +103,9 @@ class PeriodicTaskManager:
             cur = self.db.execute("""
                 INSERT INTO periodic_tasks 
                 (name, category, cycle_type, weekday, day_of_month, range_start, range_end, n_per_month, 
-                 time_of_day, event_time, timezone, is_active, count_current_month, end_date, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Asia/Shanghai', 1, 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                 time_of_day, event_time, timezone, is_active, count_current_month, end_date, reminder_template,
+                 created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Asia/Shanghai', 1, 0, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """, (
                 params.get('name'),
                 params.get('category', 'Inbox'),
@@ -115,7 +117,8 @@ class PeriodicTaskManager:
                 params.get('n_per_month'),
                 params.get('time_of_day', '09:00'),
                 params.get('time_of_day', '09:00'),
-                params.get('end_date')
+                params.get('end_date'),
+                params.get('reminder_template')
             ))
             db_commit()
             clear_task_cache()
@@ -151,11 +154,14 @@ class PeriodicTaskManager:
     def schedule_reminder_cron(self, task_id: int, occ_date: date, time_of_day: str) -> Optional[str]:
         """Create a one-shot cron job for this occurrence. Returns job_name or None if in past.
         Reminder is scheduled 5 minutes before the actual event time."""
-        cur = self.db.execute("SELECT name FROM periodic_tasks WHERE id = ?", (task_id,))
+        cur = self.db.execute(
+            "SELECT name, reminder_template FROM periodic_tasks WHERE id = ?",
+            (task_id,),
+        )
         row = cur.fetchone()
         if not row:
             return None
-        task_name = row[0]
+        task_name, reminder_template = row[0], row[1]
 
         try:
             chat_id = get_chat_id()
@@ -186,7 +192,9 @@ class PeriodicTaskManager:
         now_utc = datetime.now(ZoneInfo('UTC'))
         if utc_dt <= now_utc:
             # Time already passed: send immediate reminder as system event
-            message_text = f"⏰ 周期任务提醒（补发）：{task_name} 已到时间（{occ_date} {time_of_day}）"
+            message_text = self._format_reminder_message(
+                task_name, occ_date, time_of_day, reminder_template, immediate=True
+            )
             try:
                 # Send immediate system event
                 subprocess.run([
@@ -205,7 +213,9 @@ class PeriodicTaskManager:
         iso_time = utc_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
         
         job_name = f"task_reminder_{task_id}_{occ_date.strftime('%Y%m%d')}"
-        message_text = f"⏰ 周期任务提醒（提前5分钟）：{task_name} 即将开始"
+        message_text = self._format_reminder_message(
+            task_name, occ_date, time_of_day, reminder_template, immediate=False
+        )
         
         cmd = [
             OPENCLAW_BIN, "cron", "add",
@@ -375,6 +385,30 @@ class PeriodicTaskManager:
             
             return affected
 
+    def _format_reminder_message(
+        self,
+        task_name: str,
+        occ_date: date,
+        time_of_day: str,
+        reminder_template: Optional[str],
+        immediate: bool,
+    ) -> str:
+        if not reminder_template:
+            if immediate:
+                return f"⏰ 周期任务提醒（补发）：{task_name} 已到时间（{occ_date} {time_of_day}）"
+            return f"⏰ 周期任务提醒（提前5分钟）：{task_name} 即将开始"
+
+        template_vars = {
+            "name": task_name,
+            "date": occ_date.isoformat(),
+            "time": time_of_day,
+            "when": "immediate" if immediate else "scheduled",
+        }
+        try:
+            return reminder_template.format_map(template_vars)
+        except KeyError:
+            return reminder_template
+
     def ensure_today_occurrences(self) -> int:
         """Lightweight: only ensure today's occurrences exist (no cleanup, no cron scheduling)."""
         today = to_shanghai_date()
@@ -442,6 +476,8 @@ def main():
                 params['n_per_month'] = args.n_per_month
             if args.end_date is not None:
                 params['end_date'] = args.end_date
+            if args.reminder_template is not None:
+                params['reminder_template'] = args.reminder_template
 
             activity_id = manager.add_activity(**params)
             print(f"✅ Added task {activity_id}: {params.get('name')}")
