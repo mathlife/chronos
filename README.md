@@ -33,7 +33,7 @@ python3 skills/chronos/scripts/todo.py add "任务名" \
   --category "分组" \
   [--cycle-type once|daily|weekly|monthly_fixed|monthly_range|monthly_n_times] \
   [--time "HH:MM"] \
-  [--weekday 0-6] \
+  [--weekday 0-6 (Mon=0, Sun=6)] \
   [--day 1-31] \
   [--range-start 1-31 --range-end 1-31] \
   [--n-per-month N]
@@ -121,20 +121,20 @@ export CHRONOS_CHAT_ID="your_chat_id_here"
 ```
 
 **2. Config file (fallback):**
-Create `~/.config/chronos/config.json`:
+Create `~/.config/chronos/config.json` (or set `CHRONOS_CONFIG_PATH` to point at a custom location):
 ```json
 {
   "chat_id": "your_chat_id_here"
 }
 ```
 
-**3. Default:** If neither is set, uses `YOUR_CHAT_ID` (original hardcoded value).
+**3. Failure mode:** If neither is set, Chronos raises a clear configuration error instead of sending reminders to an unsafe default destination.
 
 ### Priority Order
 
 1. `CHRONOS_CHAT_ID` environment variable
 2. `~/.config/chronos/config.json` → `chat_id` field
-3. Default: `YOUR_CHAT_ID`
+3. No fallback destination; missing configuration raises `ValueError`
 
 ### Examples
 
@@ -152,6 +152,9 @@ cat > ~/.config/chronos/config.json <<EOF
   "chat_id": "12345678"
 }
 EOF
+
+# Optional: point to a custom config path
+export CHRONOS_CONFIG_PATH="/path/to/chronos/config.json"
 ```
 
 ## Testing Configuration
@@ -161,6 +164,17 @@ Run the included test suite to verify configuration works:
 ```bash
 python3 skills/chronos/scripts/test_config.py
 ```
+
+## Runtime Paths
+
+Chronos resolves runtime paths dynamically so it can run both inside OpenClaw workspaces and as a standalone checkout:
+
+- `CHRONOS_DB_PATH`: explicitly set the SQLite database file
+- `CHRONOS_WORKSPACE` or `OPENCLAW_WORKSPACE`: point to a shared workspace root
+- Without either, Chronos prefers an existing `todo.db` and falls back to the local project directory
+- `CHRONOS_PYTHON_BIN`: override the Python interpreter used to launch helper scripts
+- `OPENCLAW_BIN`: override the `openclaw` binary if it is not on `PATH`
+- `CHRONOS_PREDICTION_LOGGER`: point to a custom `prediction_logger.py` if it lives outside the workspace
 
 ## Architecture
 

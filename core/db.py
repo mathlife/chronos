@@ -1,11 +1,9 @@
 """Database layer with connection pooling and caching."""
 import sqlite3
-from pathlib import Path
 from functools import lru_cache
 from typing import Optional
 
-WORKSPACE = Path("/home/ubuntu/.openclaw/workspace")
-TODO_DB = WORKSPACE / "todo.db"
+from .paths import TODO_DB
 
 class DB:
     """Singleton database connection with query caching."""
@@ -19,7 +17,8 @@ class DB:
 
     def __init__(self):
         if self._conn is None:
-            self._conn = sqlite3.connect(TODO_DB)
+            TODO_DB.parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(str(TODO_DB))
             self._conn.row_factory = sqlite3.Row
 
     def execute(self, query: str, params: tuple = ()):

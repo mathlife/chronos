@@ -43,8 +43,8 @@ user-invocable: true
 
 - **Chat ID**: Reminder notifications target a specific chat. Configure via:
   - Environment variable: `CHRONOS_CHAT_ID`
-  - Config file: `~/.config/chronos/config.json` with field `chat_id`
-  - Default: `YOUR_CHAT_ID` (fallback)
+  - Config file: `~/.config/chronos/config.json` (or `CHRONOS_CONFIG_PATH`) with field `chat_id`
+  - If neither is set, Chronos raises a configuration error
 
 ## Usage
 
