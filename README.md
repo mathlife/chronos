@@ -166,6 +166,14 @@ EOF
 export CHRONOS_CONFIG_PATH="/path/to/chronos/config.json"
 ```
 
+## Schema Preflight
+
+Check the actual runtime DB path, required tables, uniqueness/FK presence, duplicate occurrences, and invalid statuses before attempting any schema migration:
+
+```bash
+python3 skills/chronos/scripts/schema_preflight.py
+```
+
 ## Legacy Cron Cleanup
 
 Dry-run legacy/orphaned Chronos cron cleanup:
@@ -186,6 +194,7 @@ Run the included checks to verify configuration, reminder routing, and repo hygi
 
 ```bash
 python3 skills/chronos/scripts/check_config.py
+python3 skills/chronos/scripts/schema_preflight.py
 python3 skills/chronos/scripts/test_config.py
 python3 -m unittest discover -s skills/chronos/tests -v
 bash skills/chronos/scripts/check_git_hygiene.sh
