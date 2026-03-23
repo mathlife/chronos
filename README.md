@@ -142,6 +142,12 @@ Create `~/.config/chronos/config.json` (or set `CHRONOS_CONFIG_PATH` to point at
 ### Examples
 
 ```bash
+# 检查当前配置是否可用，以及 chat_id 来自哪里
+python3 skills/chronos/scripts/check_config.py
+```
+
+
+```bash
 # Method 1: Environment variable (temporary, session-only)
 CHRONOS_CHAT_ID="12345678" python3 skills/chronos/scripts/todo.py add "每日签到" --cycle-type daily --time "09:00"
 
@@ -165,6 +171,7 @@ export CHRONOS_CONFIG_PATH="/path/to/chronos/config.json"
 Run the included checks to verify configuration, reminder routing, and repo hygiene:
 
 ```bash
+python3 skills/chronos/scripts/check_config.py
 python3 skills/chronos/scripts/test_config.py
 python3 -m unittest discover -s skills/chronos/tests -v
 bash skills/chronos/scripts/check_git_hygiene.sh

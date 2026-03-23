@@ -1,6 +1,6 @@
 """Configuration module for Chronos skill."""
-import os
 import json
+import os
 from pathlib import Path
 
 
@@ -12,59 +12,83 @@ def get_config_path() -> Path:
     return Path.home() / ".config" / "chronos" / "config.json"
 
 
+def _load_config_file(config_path: Path) -> tuple[dict, str | None]:
+    if not config_path.exists():
+        return {}, None
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            return json.load(f), None
+    except (json.JSONDecodeError, IOError) as exc:
+        return {}, f"Failed to read chronos config: {exc}"
+
+
+def inspect_config() -> dict:
+    """Return structured diagnostics for configuration resolution."""
+    config_path = get_config_path()
+    env_chat_id = os.getenv("CHRONOS_CHAT_ID")
+    file_config, file_error = _load_config_file(config_path)
+    file_chat_id = file_config.get("chat_id") if isinstance(file_config, dict) else None
+
+    env_chat_id = env_chat_id.strip() if isinstance(env_chat_id, str) else env_chat_id
+    file_chat_id = str(file_chat_id).strip() if file_chat_id is not None else None
+
+    resolved_chat_id = None
+    source = None
+    status = "ok"
+    error = file_error
+
+    if env_chat_id:
+        resolved_chat_id = env_chat_id
+        source = "env"
+    elif file_chat_id:
+        resolved_chat_id = file_chat_id
+        source = "config"
+    else:
+        status = "error"
+        if not error:
+            error = (
+                "CHRONOS_CHAT_ID not configured. Please set an environment variable or add "
+                f"chat_id to {config_path}"
+            )
+
+    return {
+        "status": status,
+        "config_path": str(config_path),
+        "config_exists": config_path.exists(),
+        "env_chat_id_present": bool(env_chat_id),
+        "file_chat_id_present": bool(file_chat_id),
+        "chat_id": resolved_chat_id,
+        "source": source,
+        "error": error,
+        "config": file_config if isinstance(file_config, dict) else {},
+    }
+
+
+def validate_config() -> dict:
+    """Return config diagnostics and raise when config is invalid."""
+    info = inspect_config()
+    if info["status"] != "ok":
+        raise ValueError(info["error"])
+    return info
+
+
 def get_chat_id() -> str:
     """Get the chat ID for reminders.
-    
+
     Priority:
     1. Environment variable: CHRONOS_CHAT_ID
     2. Config file: ~/.config/chronos/config.json or CHRONOS_CONFIG_PATH (field: chat_id)
     3. Raises error if not configured
-    
-    Returns:
-        Chat ID as string
-        
-    Raises:
-        ValueError: If chat_id is not configured
     """
-    # 1. Check environment variable
-    chat_id = os.getenv("CHRONOS_CHAT_ID")
-    if chat_id:
-        return chat_id.strip()
-    
-    # 2. Check config file
-    config_path = get_config_path()
-    if config_path.exists():
-        try:
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-                if 'chat_id' in config and config['chat_id']:
-                    return str(config['chat_id']).strip()
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"Warning: Failed to read chronos config: {e}")
-    
-    # 3. No default - require configuration
-    raise ValueError(
-        "CHRONOS_CHAT_ID not configured. Please set:\n"
-        "  1. Environment variable: export CHRONOS_CHAT_ID='your_chat_id'\n"
-        "  2. Or config file: echo '{\"chat_id\": \"your_chat_id\"}' > ~/.config/chronos/config.json\n"
-        "     (or set CHRONOS_CONFIG_PATH to a custom location)"
-    )
+    return validate_config()["chat_id"]
 
 
 def get_config() -> dict:
     """Get full configuration dictionary."""
-    config = {
-        'chat_id': get_chat_id(),
-    }
-    
-    # Load additional config file if exists
-    config_path = get_config_path()
-    if config_path.exists():
-        try:
-            with open(config_path, 'r') as f:
-                file_config = json.load(f)
-                config.update(file_config)
-        except (json.JSONDecodeError, IOError):
-            pass
-    
+    info = validate_config()
+    config = dict(info["config"])
+    config["chat_id"] = info["chat_id"]
+    config["chat_id_source"] = info["source"]
+    config["config_path"] = info["config_path"]
     return config
