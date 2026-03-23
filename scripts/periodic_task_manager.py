@@ -20,7 +20,7 @@ from core.scheduler import TaskScheduler, to_shanghai_date
 from core.learning import LearningContext
 from core.models import PeriodicTask
 from core.config import get_chat_id
-from core.paths import OPENCLAW_BIN
+from core.openclaw_cron import build_cron_add_command, build_cron_remove_command
 
 CYCLE_TYPES = ['once', 'daily', 'weekly', 'monthly_fixed', 'monthly_range', 'monthly_n_times']
 
@@ -193,16 +193,17 @@ class PeriodicTaskManager:
                 task_name, occ_date, time_of_day, reminder_template, immediate=True
             )
             try:
-                # Send immediate system event
-                subprocess.run([
-                    OPENCLAW_BIN, "cron", "add",
-                    "--name", f"reminder_immediate_{task_id}_{occ_date.strftime('%Y%m%d%H%M')}",
-                    "--at", now_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-                    "--message", message_text,
-                    "--session", "isolated",
-                    "--announce",
-                    "--to", chat_id
-                ], capture_output=True, text=True, timeout=10)
+                subprocess.run(
+                    build_cron_add_command(
+                        job_name=f"reminder_immediate_{task_id}_{occ_date.strftime('%Y%m%d%H%M')}",
+                        at_iso=now_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                        message=message_text,
+                        chat_id=chat_id,
+                    ),
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
             except (OSError, subprocess.SubprocessError) as e:
                 print(f"Failed to send immediate reminder: {e}")
             return None  # No persistent cron job
@@ -214,15 +215,12 @@ class PeriodicTaskManager:
             task_name, occ_date, time_of_day, reminder_template, immediate=False
         )
         
-        cmd = [
-            OPENCLAW_BIN, "cron", "add",
-            "--name", job_name,
-            "--at", iso_time,
-            "--message", message_text,
-            "--session", "isolated",
-            "--announce",
-            "--to", chat_id
-        ]
+        cmd = build_cron_add_command(
+            job_name=job_name,
+            at_iso=iso_time,
+            message=message_text,
+            chat_id=chat_id,
+        )
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.SubprocessError) as e:
@@ -287,7 +285,7 @@ class PeriodicTaskManager:
         for occ_id, job_name in jobs:
             try:
                 result = subprocess.run(
-                    [OPENCLAW_BIN, "cron", "remove", job_name],
+                    build_cron_remove_command(job_name),
                     capture_output=True, text=True, timeout=10
                 )
                 if result.returncode == 0:
@@ -374,7 +372,7 @@ class PeriodicTaskManager:
             for job_name in job_names:
                 try:
                     subprocess.run(
-                        [OPENCLAW_BIN, "cron", "remove", job_name],
+                        build_cron_remove_command(job_name),
                         capture_output=True, text=True, timeout=10
                     )
                 except:

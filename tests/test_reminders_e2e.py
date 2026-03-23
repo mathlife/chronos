@@ -188,7 +188,7 @@ class ReminderEndToEndTests(unittest.TestCase):
             self.assertIsNotNone(row)
             self.assertIsNone(row["reminder_job_id"])
             cmd = mock_run.call_args.args[0]
-            self.assertEqual(cmd[:3], [self.module.OPENCLAW_BIN, "cron", "remove"])
+            self.assertEqual(cmd[:3], [self.module.build_cron_remove_command("task_reminder_1_20260322")[0], "cron", "remove"])
             self.assertEqual(cmd[3], "task_reminder_1_20260322")
 
 
