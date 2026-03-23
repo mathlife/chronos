@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Reminder cron creation/removal now goes through a shared helper instead of duplicating argv construction.
-- README verification steps now include full test discovery and git hygiene checks.
+- README verification steps now include config diagnostics, schema preflight, full test discovery, legacy cron dry-run cleanup, and git hygiene checks.
 
 ### Fixed
 - Removed previously tracked Python cache artifacts from git history going forward.

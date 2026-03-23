@@ -188,6 +188,20 @@ Apply cleanup:
 python3 skills/chronos/scripts/cleanup_legacy_cron.py --apply
 ```
 
+## Recommended Maintenance Flow
+
+For safe maintenance on a live Chronos setup, use this order:
+
+```bash
+python3 skills/chronos/scripts/check_config.py
+python3 skills/chronos/scripts/schema_preflight.py
+python3 skills/chronos/scripts/cleanup_legacy_cron.py          # dry-run
+python3 -m unittest discover -s skills/chronos/tests -v
+bash skills/chronos/scripts/check_git_hygiene.sh
+```
+
+Only use `--apply` on legacy cron cleanup after reviewing the dry-run output.
+
 ## Testing Configuration
 
 Run the included checks to verify configuration, reminder routing, and repo hygiene:
