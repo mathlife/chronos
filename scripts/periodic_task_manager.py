@@ -396,6 +396,7 @@ class PeriodicTaskManager:
             return f"⏰ 周期任务提醒（提前5分钟）：{task_name} 即将开始"
 
         template_vars = {
+            "task_name": task_name,  # 支持两种写法：{task_name} 或 {name}
             "name": task_name,
             "date": occ_date.isoformat(),
             "time": time_of_day,

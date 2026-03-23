@@ -49,7 +49,7 @@ python3 skills/chronos/scripts/todo.py show <ID|FIN-occ_id>
 ### Direct Manager
 
 ```bash
-# 每日自动运行（cron 03:30）
+# 每日自动运行（由 OpenClaw cron 在当前环境调度；请以实际 jobs 配置为准）
 python3 skills/chronos/scripts/periodic_task_manager.py
 
 # 手动添加周期任务
@@ -114,7 +114,9 @@ Chronos supports configurable reminder destinations via chat ID.
 
 ### Chat ID Configuration
 
-Reminder notifications are sent to a specific chat. Configure using:
+Reminder notifications are sent to a specific chat, and Chronos now requires an explicit destination. It does not fall back to implicit routing like `last`.
+
+Configure using:
 
 **1. Environment variable (highest priority):**
 ```bash
@@ -185,7 +187,7 @@ Chronos resolves runtime paths dynamically so it can run both inside OpenClaw wo
 
 ## Migration from todo-management
 
-数据已自动迁移完成。现在使用 `todo.py` 作为唯一入口，`periodic_task_manager.py` 作为周期任务管理器。Cron 任务每天 03:30 自动运行。
+数据已自动迁移完成。现在使用 `todo.py` 作为唯一入口，`periodic_task_manager.py` 作为周期任务管理器。提醒投递必须显式配置 `chat_id`，未配置时会直接报错，不再依赖隐式目标。
 
 ## License
 
