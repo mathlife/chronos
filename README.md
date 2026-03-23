@@ -162,10 +162,12 @@ export CHRONOS_CONFIG_PATH="/path/to/chronos/config.json"
 
 ## Testing Configuration
 
-Run the included test suite to verify configuration works:
+Run the included checks to verify configuration, reminder routing, and repo hygiene:
 
 ```bash
 python3 skills/chronos/scripts/test_config.py
+python3 -m unittest discover -s skills/chronos/tests -v
+bash skills/chronos/scripts/check_git_hygiene.sh
 ```
 
 ## Runtime Paths
