@@ -166,6 +166,20 @@ EOF
 export CHRONOS_CONFIG_PATH="/path/to/chronos/config.json"
 ```
 
+## Legacy Cron Cleanup
+
+Dry-run legacy/orphaned Chronos cron cleanup:
+
+```bash
+python3 skills/chronos/scripts/cleanup_legacy_cron.py
+```
+
+Apply cleanup:
+
+```bash
+python3 skills/chronos/scripts/cleanup_legacy_cron.py --apply
+```
+
 ## Testing Configuration
 
 Run the included checks to verify configuration, reminder routing, and repo hygiene:
