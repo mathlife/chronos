@@ -426,17 +426,108 @@ class PeriodicTaskManager:
         
         return count
 
+    def _build_today_todo_snapshot(self, today: date) -> str:
+        """Render today's todo snapshot for proactive delivery."""
+        periodic_rows = self.db.execute(
+            """
+            SELECT o.id, o.date, o.status, t.name, t.cycle_type
+            FROM periodic_occurrences o
+            JOIN periodic_tasks t ON o.task_id = t.id
+            WHERE o.date = ? AND o.status IN ('pending', 'reminded', 'skipped', 'completed')
+            ORDER BY t.time_of_day, t.name, o.id
+            """,
+            (today.isoformat(),),
+        ).fetchall()
+
+        simple_rows = self.db.execute(
+            """
+            SELECT e.id, e.text, e.status, COALESCE(g.name, 'Inbox') AS group_name
+            FROM entries e
+            LEFT JOIN groups g ON e.group_id = g.id
+            WHERE e.status IN ('pending', 'in_progress', 'skipped')
+            ORDER BY e.id
+            """
+        ).fetchall()
+
+        lines = [f"📋 今日待办总览（{today.isoformat()}）"]
+        if periodic_rows:
+            lines.append("")
+            lines.append("【今日周期任务】")
+            for row in periodic_rows:
+                status = row['status']
+                if status == 'reminded':
+                    status = '已提醒'
+                elif status == 'skipped':
+                    status = '已跳过'
+                elif status == 'completed':
+                    status = '已完成'
+                lines.append(f"- FIN-{row['id']} | {row['name']} ({row['cycle_type']}) | {status}")
+        else:
+            lines.append("")
+            lines.append("【今日周期任务】")
+            lines.append("- 无")
+
+        if simple_rows:
+            lines.append("")
+            lines.append("【其他待办】")
+            for row in simple_rows:
+                status = row['status']
+                if status == 'in_progress':
+                    status = '进行中'
+                elif status == 'skipped':
+                    status = '已跳过'
+                lines.append(f"- ID{row['id']} | {row['group_name']} | {row['text']} | {status}")
+        else:
+            lines.append("")
+            lines.append("【其他待办】")
+            lines.append("- 无")
+
+        return "\n".join(lines)
+
+    def _send_today_todo_snapshot(self, today: date) -> bool:
+        """Push today's todo snapshot to the configured chat."""
+        try:
+            chat_id = get_chat_id()
+        except ValueError as exc:
+            print(f"Chronos chat_id not configured for todo snapshot: {exc}")
+            return False
+
+        now_utc = datetime.now(ZoneInfo('UTC')).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        message_text = self._build_today_todo_snapshot(today)
+        job_name = f"todo_snapshot_{today.strftime('%Y%m%d')}"
+        try:
+            result = subprocess.run(
+                build_cron_add_command(
+                    job_name=job_name,
+                    at_iso=now_utc,
+                    message=message_text,
+                    chat_id=chat_id,
+                ),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            print(f"Failed to send todo snapshot: {e}")
+            return False
+
+        if result.returncode != 0:
+            print(f"Failed to send todo snapshot: {result.stderr}")
+            return False
+        return True
+
     def run_daily(self) -> int:
-        """Daily main entry: generate reminders and clean old cron jobs."""
+        """Daily main entry: generate reminders, clean old cron jobs, and push today's todo snapshot."""
         with LearningContext("periodic_manager_daily_run", 
-                             "Generate today's reminders and clean old cron jobs",
+                             "Generate today's reminders, clean old cron jobs, and push today's todo snapshot",
                              confidence="H"):
             today = to_shanghai_date()
             scheduled = self.generate_reminders_for_today()
             cleaned = self.cleanup_old_jobs(today - timedelta(days=1))
+            snapshot_sent = 1 if self._send_today_todo_snapshot(today) else 0
             
             # Prediction outcome logged by LearningContext
-            return scheduled + cleaned
+            return scheduled + cleaned + snapshot_sent
 
 def main():
     manager = PeriodicTaskManager()
