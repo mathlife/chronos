@@ -240,10 +240,11 @@ class PeriodicTaskManager:
         now_utc = datetime.now(ZoneInfo('UTC'))
         if utc_dt <= now_utc:
             message_text = self._format_reminder_message(task_name, occ_date, time_of_day, reminder_template, immediate=True)
+            immediate_job_name = f"reminder_immediate_{task_id}_{occ_date.strftime('%Y%m%d')}_{time_of_day.replace(':', '')}"
             try:
                 subprocess.run(
                     build_cron_add_command(
-                        job_name=f"reminder_immediate_{task_id}_{occ_date.strftime('%Y%m%d%H%M')}",
+                        job_name=immediate_job_name,
                         at_iso=now_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
                         message=message_text,
                         chat_id=chat_id,

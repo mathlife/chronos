@@ -148,6 +148,27 @@ class SchemaPreflightTests(unittest.TestCase):
             self.assertEqual(info["status"], "warn")
             self.assertFalse(info["checks"]["periodic_occurrences_unique_task_date"])
 
+    def test_inspect_schema_allows_multiple_hourly_occurrences_same_day(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "todo.db"
+            create_db(db_path, cycle_types=["hourly"])
+            conn = sqlite3.connect(db_path)
+            conn.execute("DELETE FROM periodic_occurrences")
+            conn.execute(
+                "INSERT INTO periodic_occurrences (task_id, date, status, scheduled_time) VALUES (1, '2026-03-01', 'pending', '00:00')"
+            )
+            conn.execute(
+                "INSERT INTO periodic_occurrences (task_id, date, status, scheduled_time) VALUES (1, '2026-03-01', 'pending', '04:00')"
+            )
+            conn.commit()
+            conn.close()
+            module = load_module(db_path)
+
+            info = module.inspect_schema()
+
+            self.assertEqual(info["status"], "ok")
+            self.assertEqual(info["checks"]["duplicate_occurrence_groups"], 0)
+
     def test_inspect_schema_warns_on_invalid_status(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "todo.db"

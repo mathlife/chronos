@@ -167,7 +167,7 @@ class ReminderEndToEndTests(unittest.TestCase):
             self.assertIsNone(row["reminder_job_id"])
 
             cmd = mock_run.call_args.args[0]
-            self.assertIn("reminder_immediate_1_202603230000", cmd)
+            self.assertIn("reminder_immediate_1_20260323_1000", cmd)
             self.assertIn("--to", cmd)
             self.assertEqual(cmd[cmd.index("--to") + 1], "123456")
 
@@ -253,6 +253,46 @@ class ReminderEndToEndTests(unittest.TestCase):
             ("2026-03-23",),
         ).fetchall()
         self.assertEqual([row[0] for row in rows], ['00:00', '04:00', '08:00', '12:00', '16:00', '20:00'])
+
+    def test_hourly_immediate_reminders_use_unique_job_names_per_slot(self):
+        self.conn.execute(
+            """
+            INSERT INTO periodic_tasks (
+                id, name, category, cycle_type, interval_hours, time_of_day, event_time, timezone,
+                is_active, count_current_month, task_kind, source, start_date, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (3, "每4小时同步", "System", "hourly", 4, "08:00", "08:00", "Asia/Shanghai", 1, 0, 'system', 'chronos', '2026-03-01'),
+        )
+        self.conn.commit()
+
+        with patch.object(self.module, "to_shanghai_date", return_value=date(2026, 3, 23)), \
+             patch.object(self.module, "datetime", wraps=self.module.datetime) as mock_datetime, \
+             patch.object(self.module, "get_chat_id", return_value="123456"), \
+             patch.object(self.module.subprocess, "run") as mock_run:
+            mock_datetime.now.return_value = self.module.datetime(2026, 3, 23, 23, 0, tzinfo=self.module.ZoneInfo("UTC"))
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+
+            scheduled = self.manager.generate_reminders_for_today()
+
+        self.assertEqual(scheduled, 0)
+        commands = [
+            call.args[0]
+            for call in mock_run.call_args_list
+            if call.args[0][call.args[0].index('--name') + 1].startswith('reminder_immediate_3_')
+        ]
+        immediate_job_names = [cmd[cmd.index('--name') + 1] for cmd in commands]
+        self.assertEqual(
+            immediate_job_names,
+            [
+                'reminder_immediate_3_20260323_0000',
+                'reminder_immediate_3_20260323_0400',
+                'reminder_immediate_3_20260323_0800',
+                'reminder_immediate_3_20260323_1200',
+                'reminder_immediate_3_20260323_1600',
+                'reminder_immediate_3_20260323_2000',
+            ],
+        )
 
 
 if __name__ == "__main__":

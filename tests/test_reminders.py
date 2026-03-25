@@ -61,7 +61,7 @@ class ReminderDeliveryTests(unittest.TestCase):
             self.assertEqual(cmd[cmd.index("--to") + 1], "123456")
             self.assertIn("--session", cmd)
             self.assertEqual(cmd[cmd.index("--session") + 1], "isolated")
-            self.assertIn("reminder_immediate_8_202603230000", cmd)
+            self.assertIn("reminder_immediate_8_20260323_1000", cmd)
 
 
 if __name__ == "__main__":

@@ -36,17 +36,31 @@ def get_table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
 
 
 def count_duplicate_occurrences(conn: sqlite3.Connection) -> int:
-    cur = conn.execute(
-        """
-        SELECT COUNT(*)
-        FROM (
-            SELECT task_id, date, COUNT(*) AS n
-            FROM periodic_occurrences
-            GROUP BY task_id, date
-            HAVING COUNT(*) > 1
+    occurrence_columns = get_table_columns(conn, "periodic_occurrences")
+    if 'scheduled_time' in occurrence_columns:
+        cur = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM (
+                SELECT task_id, date, COALESCE(scheduled_time, '') AS scheduled_key, COUNT(*) AS n
+                FROM periodic_occurrences
+                GROUP BY task_id, date, COALESCE(scheduled_time, '')
+                HAVING COUNT(*) > 1
+            )
+            """
         )
-        """
-    )
+    else:
+        cur = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM (
+                SELECT task_id, date, COUNT(*) AS n
+                FROM periodic_occurrences
+                GROUP BY task_id, date
+                HAVING COUNT(*) > 1
+            )
+            """
+        )
     return int(cur.fetchone()[0])
 
 
