@@ -619,16 +619,40 @@ def complete_periodic_occurrence(occ_id: int, *, completion_mode: str = 'manual'
     return True, f"✅ 已完成 FIN-{occ_id}（任务ID {task_id}）"
 
 
+def get_entry_archive_state(cur: sqlite3.Cursor, entry_id: int) -> dict | None:
+    columns = {row[1] for row in cur.execute("PRAGMA table_info(entries)").fetchall()}
+    readonly_expr = 'COALESCE(chronos_readonly, 0)' if 'chronos_readonly' in columns else '0'
+    archived_at_expr = 'chronos_archived_at' if 'chronos_archived_at' in columns else 'NULL'
+    linked_task_expr = 'chronos_linked_task_id' if 'chronos_linked_task_id' in columns else 'NULL'
+    archive_reason_expr = 'chronos_archive_reason' if 'chronos_archive_reason' in columns else 'NULL'
+    cur.execute(
+        f"SELECT status, {readonly_expr}, {archived_at_expr}, {linked_task_expr}, {archive_reason_expr} FROM entries WHERE id = ?",
+        (entry_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        'status': row[0],
+        'chronos_readonly': int(row[1] or 0),
+        'chronos_archived_at': row[2],
+        'chronos_linked_task_id': row[3],
+        'chronos_archive_reason': row[4],
+    }
+
+
 def complete_legacy_entry(entry_id: int) -> tuple[bool, str]:
     conn = sqlite3.connect(str(TODO_DB))
     try:
         cur = conn.cursor()
-        cur.execute("SELECT status FROM entries WHERE id = ?", (entry_id,))
-        row = cur.fetchone()
-        if not row:
+        state = get_entry_archive_state(cur, entry_id)
+        if not state:
             return False, f"❌ 未找到 ID {entry_id}"
 
-        current_status = row[0]
+        current_status = state['status']
+        if state['chronos_readonly']:
+            task_hint = f"，请改为操作关联周期任务 {state['chronos_linked_task_id']}" if state['chronos_linked_task_id'] else ''
+            return False, f"❌ ID {entry_id} 是只读 legacy 归档记录{task_hint}"
         if current_status == 'skipped':
             return False, f"❌ 无法完成已跳过的任务 ID {entry_id}"
         if current_status == 'done':
@@ -955,14 +979,18 @@ def cmd_skip(identifier):
         try:
             conn = sqlite3.connect(str(TODO_DB))
             cur = conn.cursor()
-            cur.execute("SELECT status FROM entries WHERE id = ?", (entry_id,))
-            row = cur.fetchone()
-            if not row:
+            state = get_entry_archive_state(cur, entry_id)
+            if not state:
                 print(f"❌ 未找到 ID {entry_id}")
                 conn.close()
                 return
 
-            current_status = row[0]
+            current_status = state['status']
+            if state['chronos_readonly']:
+                task_hint = f"，请改为操作关联周期任务 {state['chronos_linked_task_id']}" if state['chronos_linked_task_id'] else ''
+                print(f"❌ ID {entry_id} 是只读 legacy 归档记录{task_hint}")
+                conn.close()
+                return
             if current_status == 'skipped':
                 print(f"⚠️  ID {entry_id} 已经是跳过状态")
                 conn.close()
@@ -1010,9 +1038,18 @@ def cmd_show(identifier):
         entry_id = parse_entry_identifier(identifier)
         conn = sqlite3.connect(str(TODO_DB))
         cur = conn.cursor()
+        columns = {row[1] for row in cur.execute("PRAGMA table_info(entries)").fetchall()}
+        readonly_expr = 'COALESCE(e.chronos_readonly, 0)' if 'chronos_readonly' in columns else '0'
+        archived_at_expr = 'e.chronos_archived_at' if 'chronos_archived_at' in columns else 'NULL'
+        linked_task_expr = 'e.chronos_linked_task_id' if 'chronos_linked_task_id' in columns else 'NULL'
+        archive_reason_expr = 'e.chronos_archive_reason' if 'chronos_archive_reason' in columns else 'NULL'
         cur.execute(
-            """
-            SELECT e.text, e.status, g.name as group_name
+            f"""
+            SELECT e.text, e.status, g.name as group_name,
+                   {readonly_expr} AS chronos_readonly,
+                   {archived_at_expr} AS chronos_archived_at,
+                   {linked_task_expr} AS chronos_linked_task_id,
+                   {archive_reason_expr} AS chronos_archive_reason
             FROM entries e
             LEFT JOIN groups g ON e.group_id = g.id
             WHERE e.id = ?
@@ -1022,11 +1059,16 @@ def cmd_show(identifier):
         row = cur.fetchone()
         conn.close()
         if row:
-            text, status, group_name = row
+            text, status, group_name, chronos_readonly, chronos_archived_at, chronos_linked_task_id, chronos_archive_reason = row
             group = group_name or 'Inbox'
             print(f"【任务】{text}")
             print(f"分组：{group}")
             print(f"状态：{status}")
+            if chronos_readonly:
+                print("Chronos：legacy 归档（只读）")
+                print(f"关联周期任务：{chronos_linked_task_id or '无'}")
+                print(f"归档时间：{chronos_archived_at or '无'}")
+                print(f"归档原因：{chronos_archive_reason or '无'}")
         else:
             print(f"❌ 未找到 ID {entry_id}")
 

@@ -145,9 +145,14 @@ class TodoSnapshotVisibilityTests(unittest.TestCase):
             "INSERT INTO entries (id, text, status, group_id) VALUES (?, ?, ?, ?)",
             (12, "已跳过普通任务", "skipped", 1),
         )
+        self.conn.execute("ALTER TABLE entries ADD COLUMN chronos_readonly INTEGER NOT NULL DEFAULT 0")
+        self.conn.execute("ALTER TABLE entries ADD COLUMN chronos_archived_at TEXT")
+        self.conn.execute("ALTER TABLE entries ADD COLUMN chronos_archive_reason TEXT")
+        self.conn.execute("ALTER TABLE entries ADD COLUMN chronos_archived_from_status TEXT")
+        self.conn.execute("ALTER TABLE entries ADD COLUMN chronos_linked_task_id INTEGER")
         self.conn.execute(
-            "INSERT INTO entries (id, text, status, group_id) VALUES (?, ?, ?, ?)",
-            (13, "已迁移旧周期任务", "pending", 1),
+            "INSERT INTO entries (id, text, status, group_id, chronos_readonly, chronos_archived_at, chronos_archive_reason, chronos_archived_from_status, chronos_linked_task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (13, "已迁移旧周期任务", "archived", 1, 1, "2026-03-25T16:50:00", "Chronos legacy archive: linked to periodic_tasks.id=3", "pending", 3),
         )
         self.conn.execute(
             "INSERT INTO periodic_tasks (id, name, category, cycle_type, time_of_day, event_time, timezone, legacy_entry_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",

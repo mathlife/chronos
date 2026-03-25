@@ -303,7 +303,12 @@ class Phase2RegressionSmokeTests(unittest.TestCase):
 
     def test_snapshot_and_list_hide_migrated_legacy_entries_from_simple_views(self):
         conn = sqlite3.connect(self.db_path)
-        conn.execute("INSERT INTO entries (id, text, status, group_id) VALUES (6, '已迁移旧任务', 'pending', 1)")
+        conn.execute("ALTER TABLE entries ADD COLUMN chronos_readonly INTEGER NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE entries ADD COLUMN chronos_archived_at TEXT")
+        conn.execute("ALTER TABLE entries ADD COLUMN chronos_archive_reason TEXT")
+        conn.execute("ALTER TABLE entries ADD COLUMN chronos_archived_from_status TEXT")
+        conn.execute("ALTER TABLE entries ADD COLUMN chronos_linked_task_id INTEGER")
+        conn.execute("INSERT INTO entries (id, text, status, group_id, chronos_readonly, chronos_archived_at, chronos_archive_reason, chronos_archived_from_status, chronos_linked_task_id) VALUES (6, '已迁移旧任务', 'archived', 1, 1, '2026-03-25T16:50:00', 'Chronos legacy archive: linked to periodic_tasks.id=13', 'pending', 13)")
         conn.execute(
             "INSERT INTO periodic_tasks (id, name, category, cycle_type, time_of_day, event_time, timezone, legacy_entry_id, source) VALUES (13, '已迁移旧任务', 'Inbox', 'daily', '12:00', '12:00', 'Asia/Shanghai', 6, 'legacy_entries_migrated')"
         )
@@ -316,6 +321,12 @@ class Phase2RegressionSmokeTests(unittest.TestCase):
         with patch.object(self.todo_module, "ensure_today_occurrences"):
             simple_rows = self.todo_module.get_simple_pending()
         self.assertEqual([row[0] for row in simple_rows], [1, 2, 3, 4])
+
+        show_buf = io.StringIO()
+        with redirect_stdout(show_buf):
+            self.todo_module.cmd_show('ID6')
+        self.assertIn('状态：archived', show_buf.getvalue())
+        self.assertIn('legacy 归档（只读）', show_buf.getvalue())
 
         manager_module = load_module("chronos_ptm_phase2_smoke", PROJECT_ROOT / "scripts" / "periodic_task_manager.py", self.db_path, self.workspace)
         manager = manager_module.PeriodicTaskManager()

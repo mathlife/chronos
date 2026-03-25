@@ -35,6 +35,8 @@ python3 skills/chronos/scripts/todo.py add "Meta-Review fallback" \
 
 python3 skills/chronos/scripts/migrate_legacy_entries.py --db /home/ubuntu/.openclaw/workspace/todo.db
 python3 skills/chronos/scripts/migrate_legacy_entries.py --db /home/ubuntu/.openclaw/workspace/todo.db --apply
+python3 skills/chronos/scripts/archive_legacy_entries.py --db /home/ubuntu/.openclaw/workspace/todo.db
+python3 skills/chronos/scripts/archive_legacy_entries.py --db /home/ubuntu/.openclaw/workspace/todo.db --apply
 python3 skills/chronos/scripts/todo.py complete-overdue --dry-run
 python3 skills/chronos/scripts/schema_preflight.py
 ```
@@ -72,3 +74,30 @@ What it will not do automatically:
 - unsupported every-N-hours rows without known handler semantics
 
 Traceability is preserved through `periodic_tasks.legacy_entry_id` and `source` (`legacy_entries_linked` / `legacy_entries_migrated`).
+
+## Final legacy archive step
+
+After migration has linked canonical tasks, run `scripts/archive_legacy_entries.py`.
+
+What it does:
+- finds `entries` rows already linked from `periodic_tasks.legacy_entry_id`
+- adds conservative archive metadata columns on `entries` if missing:
+  - `chronos_readonly`
+  - `chronos_archived_at`
+  - `chronos_archive_reason`
+  - `chronos_archived_from_status`
+  - `chronos_linked_task_id`
+- marks linked legacy rows `status='archived'` + `chronos_readonly=1`
+- keeps the original row in place for audit / traceability
+- keeps active Chronos surfaces clean because linked rows are already excluded from live list/snapshot/overdue queries
+
+Operational effect:
+- migrated legacy rows stop looking like live legacy tasks
+- `todo.py show ID<n>` still exposes the archive trail
+- `todo.py complete ID<n>` / `skip ID<n>` now fail closed on readonly archived legacy rows and point operators back to the linked canonical periodic task
+
+Recommended sequence:
+1. `python3 skills/chronos/scripts/migrate_legacy_entries.py --db /path/to/todo.db`
+2. `python3 skills/chronos/scripts/migrate_legacy_entries.py --db /path/to/todo.db --apply`
+3. `python3 skills/chronos/scripts/archive_legacy_entries.py --db /path/to/todo.db`
+4. `python3 skills/chronos/scripts/archive_legacy_entries.py --db /path/to/todo.db --apply`

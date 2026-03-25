@@ -269,6 +269,40 @@ class TodoOverdueCompletionTests(unittest.TestCase):
         self.assertEqual(entries[0]['special_handler'], 'meta_review_fallback')
         self.assertIsNone(entries[1]['special_handler'])
 
+    def test_archived_readonly_legacy_entry_is_rejected_by_complete_skip_and_show(self):
+        conn = self._connect()
+        conn.execute("ALTER TABLE entries ADD COLUMN chronos_readonly INTEGER NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE entries ADD COLUMN chronos_archived_at TEXT")
+        conn.execute("ALTER TABLE entries ADD COLUMN chronos_archive_reason TEXT")
+        conn.execute("ALTER TABLE entries ADD COLUMN chronos_archived_from_status TEXT")
+        conn.execute("ALTER TABLE entries ADD COLUMN chronos_linked_task_id INTEGER")
+        conn.execute(
+            "UPDATE entries SET status = 'archived', chronos_readonly = 1, chronos_archived_at = '2026-03-25T16:50:00', chronos_archive_reason = 'Chronos legacy archive: linked to periodic_tasks.id=2', chronos_archived_from_status = 'pending', chronos_linked_task_id = 2 WHERE id = 16"
+        )
+        conn.commit()
+        conn.close()
+
+        with patch.object(todo_module, 'TODO_DB', self.db_path):
+            ok_complete, message_complete = todo_module.complete_legacy_entry(16)
+        self.assertFalse(ok_complete)
+        self.assertIn('只读 legacy 归档记录', message_complete)
+        self.assertIn('关联周期任务 2', message_complete)
+
+        with patch.object(todo_module, 'TODO_DB', self.db_path):
+            skip_buf = io.StringIO()
+            with redirect_stdout(skip_buf):
+                todo_module.cmd_skip('ID16')
+        self.assertIn('只读 legacy 归档记录', skip_buf.getvalue())
+
+        with patch.object(todo_module, 'TODO_DB', self.db_path):
+            show_buf = io.StringIO()
+            with redirect_stdout(show_buf):
+                todo_module.cmd_show('ID16')
+        show_output = show_buf.getvalue()
+        self.assertIn('状态：archived', show_output)
+        self.assertIn('Chronos：legacy 归档（只读）', show_output)
+        self.assertIn('关联周期任务：2', show_output)
+
     def test_complete_overdue_tasks_runs_special_handler_from_periodic_metadata(self):
         list_sessions = json.dumps(['agent:main:subagent:abc', 'main'])
 
