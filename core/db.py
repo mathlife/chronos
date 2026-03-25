@@ -5,6 +5,32 @@ from typing import Optional
 
 from .paths import TODO_DB
 
+
+TASK_SCHEMA_COLUMNS = {
+    'reminder_template': "ALTER TABLE periodic_tasks ADD COLUMN reminder_template TEXT",
+    'last_reminder_error': "ALTER TABLE periodic_tasks ADD COLUMN last_reminder_error TEXT",
+    'reminder_error_count': "ALTER TABLE periodic_tasks ADD COLUMN reminder_error_count INTEGER DEFAULT 0",
+    'last_reminder_error_at': "ALTER TABLE periodic_tasks ADD COLUMN last_reminder_error_at TIMESTAMP",
+    'task_kind': "ALTER TABLE periodic_tasks ADD COLUMN task_kind TEXT NOT NULL DEFAULT 'scheduled'",
+    'source': "ALTER TABLE periodic_tasks ADD COLUMN source TEXT NOT NULL DEFAULT 'chronos'",
+    'legacy_entry_id': "ALTER TABLE periodic_tasks ADD COLUMN legacy_entry_id INTEGER",
+    'special_handler': "ALTER TABLE periodic_tasks ADD COLUMN special_handler TEXT",
+    'handler_payload': "ALTER TABLE periodic_tasks ADD COLUMN handler_payload TEXT",
+    'start_date': "ALTER TABLE periodic_tasks ADD COLUMN start_date TEXT",
+    'delivery_target': "ALTER TABLE periodic_tasks ADD COLUMN delivery_target TEXT",
+    'delivery_mode': "ALTER TABLE periodic_tasks ADD COLUMN delivery_mode TEXT",
+    'dates_list': "ALTER TABLE periodic_tasks ADD COLUMN dates_list TEXT",
+}
+
+OCCURRENCE_SCHEMA_COLUMNS = {
+    'completion_mode': "ALTER TABLE periodic_occurrences ADD COLUMN completion_mode TEXT",
+    'special_handler_result': "ALTER TABLE periodic_occurrences ADD COLUMN special_handler_result TEXT",
+    'scheduled_time': "ALTER TABLE periodic_occurrences ADD COLUMN scheduled_time TEXT",
+    'scheduled_at': "ALTER TABLE periodic_occurrences ADD COLUMN scheduled_at TEXT",
+    'legacy_entry_id': "ALTER TABLE periodic_occurrences ADD COLUMN legacy_entry_id INTEGER",
+}
+
+
 class DB:
     """Singleton database connection with query caching."""
     _instance: Optional['DB'] = None
@@ -43,12 +69,15 @@ class DB:
             self._conn.close()
             self._conn = None
 
+
 # Convenience functions
 def db_execute(query: str, params: tuple = ()):
     return DB().execute(query, params)
 
+
 def db_commit():
     DB().commit()
+
 
 @lru_cache(maxsize=128)
 def get_periodic_tasks(active_only: bool = True):
@@ -60,6 +89,7 @@ def get_periodic_tasks(active_only: bool = True):
     rows = cur.fetchall()
     return [dict(row) for row in rows]
 
+
 @lru_cache(maxsize=128)
 def get_periodic_task(task_id: int):
     """Fetch single task by ID (cached)."""
@@ -67,33 +97,37 @@ def get_periodic_task(task_id: int):
     row = cur.fetchone()
     return dict(row) if row else None
 
+
 def clear_task_cache():
     """Clear task cache (called after updates)."""
     get_periodic_tasks.cache_clear()
     get_periodic_task.cache_clear()
 
+
+def _ensure_table_columns(db: DB, table_name: str, statements: dict[str, str]) -> None:
+    cur = db.execute(f"PRAGMA table_info({table_name})")
+    columns = {row[1] for row in cur.fetchall()}
+    changed = False
+    for column_name, statement in statements.items():
+        if column_name not in columns:
+            db.execute(statement)
+            changed = True
+    if changed:
+        db.commit()
+
+
 def ensure_schema(db: Optional[DB] = None):
-    """Ensure database schema has all required columns."""
+    """Ensure database schema has all phase-1 Chronos columns."""
     db = db or DB()
-    table_row = db.execute(
+
+    tasks_table = db.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='periodic_tasks'"
     ).fetchone()
-    if not table_row:
-        return
+    if tasks_table:
+        _ensure_table_columns(db, 'periodic_tasks', TASK_SCHEMA_COLUMNS)
 
-    cur = db.execute("PRAGMA table_info(periodic_tasks)")
-    columns = {row[1] for row in cur.fetchall()}  # column name at index 1
-
-    # Add reminder_template column if missing
-    if 'reminder_template' not in columns:
-        db.execute("ALTER TABLE periodic_tasks ADD COLUMN reminder_template TEXT")
-        db.commit()
-        print("Added reminder_template column to periodic_tasks")
-
-    # Add error tracking columns for monitoring
-    if 'last_reminder_error' not in columns:
-        db.execute("ALTER TABLE periodic_tasks ADD COLUMN last_reminder_error TEXT")
-        db.execute("ALTER TABLE periodic_tasks ADD COLUMN reminder_error_count INTEGER DEFAULT 0")
-        db.execute("ALTER TABLE periodic_tasks ADD COLUMN last_reminder_error_at TIMESTAMP")
-        db.commit()
-        print("Added error tracking columns to periodic_tasks")
+    occurrences_table = db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='periodic_occurrences'"
+    ).fetchone()
+    if occurrences_table:
+        _ensure_table_columns(db, 'periodic_occurrences', OCCURRENCE_SCHEMA_COLUMNS)

@@ -1,248 +1,30 @@
 # Chronos
 
-通用周期任务管理器 - 适用于所有定时任务场景。支持6种周期类型、每月N次配额、自动cron、统一视图。
+Chronos is a lightweight recurring-task engine backed by `periodic_tasks` + `periodic_occurrences`, with temporary compatibility for legacy `entries` rows.
 
-## Features
+## Phase-1 data model direction
 
-- **6种周期类型**: `once`, `daily`, `weekly`, `monthly_fixed`, `monthly_range`, `monthly_n_times`
-- **智能配额**: 每月N次基于活动日计数，用完后自动完成剩余日期（适用于抢券、签到等限次活动）
-- **自动提醒**: Cron 任务自动生成/清理，无需手动管理
-- **统一视图**: `todo.py` 合并显示周期任务和其他任务
-- **数据迁移**: 自动迁移旧 todo-management 数据
-- **双环学习**: 内置预测- outcome 追踪
-- **通用场景**: 适用于所有定时任务（日常签到、活动提醒、周期性维护等）
+- `periodic_tasks` is the canonical definition table for scheduled work.
+- `periodic_occurrences` is the canonical execution/reminder table.
+- `entries` remains only for inbox-style one-shot notes and legacy compatibility.
+- Scheduled `once` tasks with an explicit `start_date` now use canonical task storage.
+- `monthly_dates` is a supported cycle type.
+- Special system behaviors should live in explicit task metadata (`special_handler`) instead of free-text regex whenever possible.
 
-## Installation
-
-```bash
-# Clone into your OpenClaw skills directory
-cd ~/.openclaw/workspace/skills
-git clone https://github.com/mathlife/chronos.git
-```
-
-## Usage
-
-### Unified Todo List
+## Quick examples
 
 ```bash
-# 查看所有待办（合并周期任务 + 其他任务）
-python3 skills/chronos/scripts/todo.py list
+python3 skills/chronos/scripts/todo.py add "一次性计划任务" \
+  --cycle-type once \
+  --start-date 2026-03-27 \
+  --time 10:00
 
-# 添加任务（自动路由：复杂周期 → manager，简单任务 → entries）
-python3 skills/chronos/scripts/todo.py add "任务名" \
-  --category "分组" \
-  [--cycle-type once|daily|weekly|monthly_fixed|monthly_range|monthly_n_times] \
-  [--time "HH:MM"] \
-  [--weekday 0-6 (Mon=0, Sun=6)] \
-  [--day 1-31] \
-  [--range-start 1-31 --range-end 1-31] \
-  [--n-per-month N] \
-  [--reminder-template "Message with {name} {date} {time} {when}"]
-
-# 完成任务
-python3 skills/chronos/scripts/todo.py complete <ID|FIN-occ_id>
-
-# 补完成今天已经过时的计划任务（周期 occurrence + 旧 entries）
-python3 skills/chronos/scripts/todo.py complete-overdue
-python3 skills/chronos/scripts/todo.py complete-overdue --dry-run
-
-# 查看详情
-python3 skills/chronos/scripts/todo.py show <ID|FIN-occ_id>
-```
-
-### Direct Manager
-
-```bash
-# 每日自动运行（由 OpenClaw cron 在当前环境调度；请以实际 jobs 配置为准）
-python3 skills/chronos/scripts/periodic_task_manager.py
-
-# 手动添加周期任务
-python3 skills/chronos/scripts/periodic_task_manager.py --add \
-  --name "任务名" \
-  --category "日常" \
-  --cycle-type monthly_n_times \
-  --weekday 2 \
-  --n-per-month 2 \
-  --time "10:00"
-
-# 批量完成活动（完成本月所有未完成任务）
-python3 skills/chronos/scripts/periodic_task_manager.py --complete-activity <task_id>
-```
-
-### Migration
-
-旧 `financial_*` 表数据已迁移到 `periodic_*` 新表，迁移脚本已删除。系统已自动完成迁移。
-
-## Examples
-
-```bash
-# 区间任务：每月11号到次月5号，每天13:55提醒
-python3 skills/chronos/scripts/todo.py add "每日活动" \
-  --cycle-type monthly_range \
-  --range-start 11 --range-end 5 \
-  --time "13:55" \
-  --category "日常"
-
-# 每月N次：每周三10:00，每月最多2次
-python3 skills/chronos/scripts/todo.py add "周三抢券" \
-  --cycle-type monthly_n_times \
-  --weekday 2 \
-  --n-per-month 2 \
-  --time "10:00" \
-  --category "活动"
-
-# 每日签到
-python3 skills/chronos/scripts/todo.py add "每日签到" \
+python3 skills/chronos/scripts/todo.py add "Meta-Review fallback" \
   --cycle-type daily \
-  --time "09:00" \
-  --category "日常"
+  --time 02:00 \
+  --task-kind system \
+  --special-handler meta_review_fallback
 
-# 每周提醒：每周四10:00
-python3 skills/chronos/scripts/todo.py add "周报提交" \
-  --cycle-type weekly \
-  --weekday 3 \
-  --time "10:00" \
-  --category "工作"
-
-# 每月固定日期：每月15号09:00
-python3 skills/chronos/scripts/todo.py add "月度总结" \
-  --cycle-type monthly_fixed \
-  --day 15 \
-  --time "09:00" \
-  --category "工作"
-```
-
-## Configuration
-
-Chronos supports configurable reminder destinations via chat ID.
-
-### Chat ID Configuration
-
-Reminder notifications are sent to a specific chat, and Chronos now requires an explicit destination. It does not fall back to implicit routing like `last`.
-
-Configure using:
-
-**1. Environment variable (highest priority):**
-```bash
-export CHRONOS_CHAT_ID="your_chat_id_here"
-```
-
-**2. Config file (fallback):**
-Create `~/.config/chronos/config.json` (or set `CHRONOS_CONFIG_PATH` to point at a custom location):
-```json
-{
-  "chat_id": "your_chat_id_here"
-}
-```
-
-**3. Failure mode:** If neither is set, Chronos raises a clear configuration error instead of sending reminders to an unsafe default destination.
-
-### Priority Order
-
-1. `CHRONOS_CHAT_ID` environment variable
-2. `~/.config/chronos/config.json` → `chat_id` field
-3. No fallback destination; missing configuration raises `ValueError`
-
-### Examples
-
-```bash
-# 检查当前配置是否可用，以及 chat_id 来自哪里
-python3 skills/chronos/scripts/check_config.py
-```
-
-
-```bash
-# Method 1: Environment variable (temporary, session-only)
-CHRONOS_CHAT_ID="12345678" python3 skills/chronos/scripts/todo.py add "每日签到" --cycle-type daily --time "09:00"
-
-# Method 2: Persistent environment variable (add to ~/.bashrc or ~/.profile)
-export CHRONOS_CHAT_ID="12345678"
-
-# Method 3: Config file (persistent, no shell config needed)
-mkdir -p ~/.config/chronos
-cat > ~/.config/chronos/config.json <<EOF
-{
-  "chat_id": "12345678"
-}
-EOF
-
-# Optional: point to a custom config path
-export CHRONOS_CONFIG_PATH="/path/to/chronos/config.json"
-```
-
-## Schema Preflight
-
-Check the actual runtime DB path, required tables, uniqueness/FK presence, duplicate occurrences, and invalid statuses before attempting any schema migration:
-
-```bash
+python3 skills/chronos/scripts/todo.py complete-overdue --dry-run
 python3 skills/chronos/scripts/schema_preflight.py
 ```
-
-## Legacy Cron Cleanup
-
-Dry-run legacy/orphaned Chronos cron cleanup:
-
-```bash
-python3 skills/chronos/scripts/cleanup_legacy_cron.py
-```
-
-Apply cleanup:
-
-```bash
-python3 skills/chronos/scripts/cleanup_legacy_cron.py --apply
-```
-
-## Recommended Maintenance Flow
-
-For safe maintenance on a live Chronos setup, use this order:
-
-```bash
-python3 skills/chronos/scripts/check_config.py
-python3 skills/chronos/scripts/schema_preflight.py
-python3 skills/chronos/scripts/cleanup_legacy_cron.py          # dry-run
-python3 -m unittest discover -s skills/chronos/tests -v
-bash skills/chronos/scripts/check_git_hygiene.sh
-```
-
-Only use `--apply` on legacy cron cleanup after reviewing the dry-run output.
-
-## Testing Configuration
-
-Run the included checks to verify configuration, reminder routing, and repo hygiene:
-
-```bash
-python3 skills/chronos/scripts/check_config.py
-python3 skills/chronos/scripts/schema_preflight.py
-python3 skills/chronos/scripts/test_config.py
-python3 -m unittest discover -s skills/chronos/tests -v
-bash skills/chronos/scripts/check_git_hygiene.sh
-```
-
-## Runtime Paths
-
-Chronos resolves runtime paths dynamically so it can run both inside OpenClaw workspaces and as a standalone checkout:
-
-- `CHRONOS_DB_PATH`: explicitly set the SQLite database file
-- `CHRONOS_WORKSPACE` or `OPENCLAW_WORKSPACE`: point to a shared workspace root
-- Without either, Chronos prefers an existing `todo.db` and falls back to the local project directory
-- `CHRONOS_PYTHON_BIN`: override the Python interpreter used to launch helper scripts
-- `OPENCLAW_BIN`: override the `openclaw` binary if it is not on `PATH`
-- `CHRONOS_PREDICTION_LOGGER`: point to a custom `prediction_logger.py` if it lives outside the workspace
-
-## Architecture
-
-- `core/`: 核心模块（数据库、调度、模型、双环学习）
-- `scripts/`: 入口脚本
-- `todo.db`: SQLite 数据库（共享）
-
-## Migration from todo-management
-
-数据已自动迁移完成。现在使用 `todo.py` 作为唯一入口，`periodic_task_manager.py` 作为周期任务管理器。提醒投递必须显式配置 `chat_id`，未配置时会直接报错，不再依赖隐式目标。
-
-## License
-
-MIT
-
-## Author
-
-Created by Mirror (AI companion) for Kong.

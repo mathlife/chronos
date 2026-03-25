@@ -6,6 +6,7 @@ Unified Todo - 统一待办管理入口
 自然语言解析：支持中文指令
 """
 import argparse
+import json
 import re
 import sqlite3
 import subprocess
@@ -17,9 +18,10 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL_DIR))
 
 from core.paths import OPENCLAW_BIN, PYTHON_BIN, SCRIPTS_DIR, TODO_DB, WORKSPACE
+from core.models import ALLOWED_CYCLE_TYPES
 
 MANAGER_SCRIPT = SCRIPTS_DIR / 'periodic_task_manager.py'
-CYCLE_TYPES = ['once', 'daily', 'weekly', 'monthly_fixed', 'monthly_range', 'monthly_n_times']
+CYCLE_TYPES = list(ALLOWED_CYCLE_TYPES)
 TIME_PATTERN = re.compile(r'(?<!\d)(\d{1,2}):(\d{2})(?!\d)')
 META_REVIEW_PATTERN = re.compile(r'meta[- ]?review|meta_auditor\.py', re.IGNORECASE)
 RECURRING_ENTRY_PATTERNS = [
@@ -66,7 +68,16 @@ def validate_add_args(args: argparse.Namespace) -> None:
             date.fromisoformat(args.end_date)
         except ValueError as exc:
             raise ValueError("end-date must be YYYY-MM-DD") from exc
+    if args.start_date:
+        try:
+            date.fromisoformat(args.start_date)
+        except ValueError as exc:
+            raise ValueError("start-date must be YYYY-MM-DD") from exc
 
+    if args.cycle_type == 'once' and args.start_date is None:
+        return
+    if args.cycle_type == 'once' and not args.start_date:
+        raise ValueError("scheduled once tasks require --start-date YYYY-MM-DD")
     if args.cycle_type == 'weekly' and args.weekday is None:
         raise ValueError("weekly tasks require --weekday")
     if args.cycle_type == 'monthly_fixed' and args.day_of_month is None:
@@ -75,13 +86,12 @@ def validate_add_args(args: argparse.Namespace) -> None:
         raise ValueError("monthly_range tasks require --range-start and --range-end")
     if args.cycle_type == 'monthly_n_times' and (args.weekday is None or args.n_per_month is None):
         raise ValueError("monthly_n_times tasks require --weekday and --n-per-month")
+    if args.cycle_type == 'monthly_dates' and not args.dates_list:
+        raise ValueError("monthly_dates tasks require --dates-list")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Chronos unified todo",
-        add_help=True,
-    )
+    parser = argparse.ArgumentParser(description="Chronos unified todo", add_help=True)
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("list", help="List all pending tasks")
@@ -96,8 +106,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.add_argument("--range-start", type=int)
     add_parser.add_argument("--range-end", type=int)
     add_parser.add_argument("--n-per-month", type=int)
+    add_parser.add_argument("--dates-list")
+    add_parser.add_argument("--start-date")
     add_parser.add_argument("--end-date")
     add_parser.add_argument("--reminder-template")
+    add_parser.add_argument("--task-kind", default="scheduled")
+    add_parser.add_argument("--special-handler")
+    add_parser.add_argument("--handler-payload")
 
     complete_parser = subparsers.add_parser("complete", help="Complete a task")
     complete_parser.add_argument("identifier")
@@ -116,7 +131,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def parse_entry_identifier(identifier: str) -> int:
-    """Accept plain numeric IDs and legacy ID-prefixed forms."""
     normalized = identifier.strip()
     if normalized.upper().startswith('ID'):
         normalized = normalized[2:]
@@ -124,7 +138,6 @@ def parse_entry_identifier(identifier: str) -> int:
 
 
 def parse_compact_end_date(date_str: str) -> str | None:
-    """Parse YYYYMMDD or YYMMDD compact end-date formats."""
     if len(date_str) == 8:
         year = int(date_str[:4])
         month = int(date_str[4:6])
@@ -143,13 +156,11 @@ def parse_compact_end_date(date_str: str) -> str | None:
 
 
 def parse_natural_language(text: str) -> dict:
-    """解析自然语言指令，返回命令和参数"""
     text = text.strip()
 
     if re.search(r'逾期|过时|已过时间', text) and re.search(r'完成|补完成|自动完成', text):
         return {'cmd': 'complete-overdue'}
 
-    # 查询命令
     if re.search(r'查询|查看|今日|待办|任务', text) and not re.search(r'添加|新增|创建', text):
         if '详情' in text or re.search(r'FIN-\d+|ID\d+', text):
             match = re.search(r'(FIN-\d+|ID\d+)', text)
@@ -158,25 +169,20 @@ def parse_natural_language(text: str) -> dict:
         else:
             return {'cmd': 'list'}
 
-    # 跳过命令
     if re.search(r'跳过|跳過|skipping?', text):
         match = re.search(r'(FIN-\d+|ID\d+)', text)
         if match:
             return {'cmd': 'skip', 'identifier': match.group(1)}
         return {'cmd': 'skip', 'identifier': None}
 
-    # 完成命令
     if re.search(r'完成|标记完成', text):
         match = re.search(r'(FIN-\d+|ID\d+)', text)
         if match:
             return {'cmd': 'complete', 'identifier': match.group(1)}
         return {'cmd': 'complete', 'identifier': None}
 
-    # 添加命令
     if re.search(r'添加|新增|创建', text):
-        # 提取结束日期（支持多种格式）
         end_date = None
-        # 格式1: 到2025年3月31日结束
         end_match = re.search(r'到(\d{4})年(\d{1,2})月(\d{1,2})日结束', text)
         if end_match:
             year = int(end_match.group(1))
@@ -184,7 +190,6 @@ def parse_natural_language(text: str) -> dict:
             day = int(end_match.group(3))
             end_date = f"{year:04d}-{month:02d}-{day:02d}"
         else:
-            # 格式2: 到3月31日结束
             end_match2 = re.search(r'到(\d{1,2})月(\d{1,2})日结束', text)
             if end_match2:
                 month = int(end_match2.group(1))
@@ -192,63 +197,49 @@ def parse_natural_language(text: str) -> dict:
                 year = datetime.now().year
                 end_date = f"{year:04d}-{month:02d}-{day:02d}"
             else:
-                # 格式3: 结束日期20260630 (8位) 或 2026063 (7位，少见)
                 end_match3 = re.search(r'结束日期(\d{6,8})', text)
                 if end_match3:
                     end_date = parse_compact_end_date(end_match3.group(1))
 
-        # 移除结束日期标记（不影响原始文本用于解析其他字段）
         text_clean = re.sub(r'到\d{4}年\d{1,2}月\d{1,2}日结束', '', text)
         text_clean = re.sub(r'到\d{1,2}月\d{1,2}日结束', '', text_clean)
         text_clean = re.sub(r'结束日期\d{6,8}', '', text_clean)
 
-        # 提取任务名
         name = '新任务'
-
-        # 1. 优先"叫"后面
         call_match = re.search(r'叫\s*(.+?)(?:，|,|$)', text_clean)
         if call_match:
             name = call_match.group(1).strip()
         else:
-            # 2. 针对每周类型：提取"周X HH:MM"后剩余部分
             after_add = re.sub(r'^添加\s*(?:待办|任务)?\s*[，,]\s*', '', text_clean)
-
-            # 匹配"周X 时间"模式
             weekday_pattern = r'(周[一二三四五六日天]|星期[一二三四五六日天])\s*(\d{1,2})(?:[:：]\s*(\d{2}))?点?'
             m = re.search(weekday_pattern, after_add)
             if m:
-                # 周期描述结束位置
                 end_pos = m.end()
                 remaining = after_add[end_pos:].strip('，, ')
                 if remaining:
                     name = remaining
                 else:
-                    # 没有剩余，用周期描述前的部分
                     before_part = after_add[:m.start()].strip('，, ')
                     if before_part:
                         name = before_part
             else:
-                # 其他类型：取第一个周期关键词之前
                 keywords = ['每周', '每天', '每日', '每月']
                 first_kw_pos = len(after_add)
                 for kw in keywords:
                     pos = after_add.find(kw)
                     if pos != -1 and pos < first_kw_pos:
                         first_kw_pos = pos
-
                 if first_kw_pos > 0:
                     name = after_add[:first_kw_pos].strip('，, ')
                 else:
                     name = after_add.strip('，, ')
 
-        # 清理
         name = re.sub(r'，|,|到\d+年.*$|到.*结束$', '', name).strip()
         if not name:
             name = '新任务'
 
         params = {'name': name}
 
-        # 周期类型
         if '每月' in text and ('次' in text or '最多' in text):
             params['cycle_type'] = 'monthly_n_times'
             n_match = re.search(r'每月最多?(\d+)次', text)
@@ -281,7 +272,6 @@ def parse_natural_language(text: str) -> dict:
         elif '每天' in text or '每日' in text:
             params['cycle_type'] = 'daily'
 
-        # 提取时间
         time_match = re.search(r'(\d{1,2})[:：]\s*(\d{2})', text)
         if not time_match:
             time_match = re.search(r'(\d{1,2})点', text)
@@ -301,33 +291,39 @@ def parse_natural_language(text: str) -> dict:
 
 
 def get_periodic_pending():
-    """获取周期任务待办（包含 skipped 状态以便显示）"""
     conn = sqlite3.connect(str(TODO_DB))
     cur = conn.cursor()
-    cur.execute("""
+    cur.execute(
+        """
         SELECT t.id as task_id, t.name, t.category, t.cycle_type,
                o.id as occ_id, o.date, o.status
         FROM periodic_occurrences o
         JOIN periodic_tasks t ON o.task_id = t.id
         WHERE o.status IN ('pending', 'reminded', 'skipped')
         ORDER BY o.date, t.name
-    """)
+        """
+    )
     rows = cur.fetchall()
     conn.close()
     return rows
 
 
 def get_simple_pending():
-    """获取原 todo 系统中的待办（直接查询 entries 表，包含 skipped）"""
     conn = sqlite3.connect(str(TODO_DB))
     cur = conn.cursor()
-    cur.execute("""
+    cur.execute(
+        """
         SELECT e.id, e.text, e.status, g.name as group_name
         FROM entries e
         LEFT JOIN groups g ON e.group_id = g.id
         WHERE e.status IN ('pending', 'in_progress', 'skipped')
+          AND NOT EXISTS (
+              SELECT 1 FROM periodic_tasks t
+              WHERE t.legacy_entry_id = e.id
+          )
         ORDER BY e.id
-    """)
+        """
+    )
     rows = cur.fetchall()
     conn.close()
     return rows
@@ -335,12 +331,7 @@ def get_simple_pending():
 
 def ensure_today_occurrences() -> None:
     try:
-        subprocess.run(
-            [PYTHON_BIN, str(MANAGER_SCRIPT), '--ensure-today'],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+        subprocess.run([PYTHON_BIN, str(MANAGER_SCRIPT), '--ensure-today'], capture_output=True, text=True, timeout=10)
     except Exception as e:
         print(f"⚠️  生成今日任务失败: {e}")
 
@@ -373,7 +364,7 @@ def get_overdue_periodic_tasks(now: datetime | None = None) -> list[dict]:
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT o.id, t.id, t.name, t.time_of_day, o.status
+        SELECT o.id, t.id, t.name, t.time_of_day, o.status, t.special_handler, t.handler_payload
         FROM periodic_occurrences o
         JOIN periodic_tasks t ON o.task_id = t.id
         WHERE o.date = ?
@@ -393,8 +384,10 @@ def get_overdue_periodic_tasks(now: datetime | None = None) -> list[dict]:
             'name': name,
             'time_of_day': time_of_day,
             'status': status,
+            'special_handler': special_handler,
+            'handler_payload': handler_payload,
         }
-        for occ_id, task_id, name, time_of_day, status in cur.fetchall()
+        for occ_id, task_id, name, time_of_day, status, special_handler, handler_payload in cur.fetchall()
     ]
     conn.close()
     return rows
@@ -412,6 +405,10 @@ def get_overdue_legacy_entries(now: datetime | None = None) -> list[dict]:
         FROM entries e
         LEFT JOIN groups g ON e.group_id = g.id
         WHERE e.status IN ('pending', 'in_progress')
+          AND NOT EXISTS (
+              SELECT 1 FROM periodic_tasks t
+              WHERE t.legacy_entry_id = e.id
+          )
         ORDER BY e.id
         """
     )
@@ -474,19 +471,27 @@ def append_memory_log(line: str, log_date: date | None = None) -> None:
     log_path.write_text(existing + prefix + line + '\n', encoding='utf-8')
 
 
-def run_meta_review_fallback(entry_text: str, now: datetime | None = None) -> tuple[bool, str]:
+def run_meta_review_fallback(task_text: str, now: datetime | None = None) -> tuple[bool, str]:
     now = now or datetime.now()
     pending_predictions = count_pending_predictions()
     active_conflicts = count_active_friction_conflicts()
     note = (
         f"- {now.strftime('%H:%M')} Meta-Review fallback completed via direct PREDICTIONS.md/FRICTION.md inspection "
-        f"for overdue task: {entry_text}. Pending predictions: {pending_predictions}; active conflicts: {active_conflicts}."
+        f"for overdue task: {task_text}. Pending predictions: {pending_predictions}; active conflicts: {active_conflicts}."
     )
     append_memory_log(note, log_date=now.date())
     return True, note
 
 
-def complete_periodic_occurrence(occ_id: int) -> tuple[bool, str]:
+def run_special_handler(handler_name: str | None, handler_payload: str | None, task_text: str, now: datetime | None = None) -> tuple[bool, str]:
+    if not handler_name:
+        return True, ''
+    if handler_name == 'meta_review_fallback':
+        return run_meta_review_fallback(task_text, now=now)
+    return False, f"❌ 不支持的 special_handler: {handler_name}"
+
+
+def complete_periodic_occurrence(occ_id: int, *, completion_mode: str = 'manual', special_handler_result: str | None = None) -> tuple[bool, str]:
     conn = sqlite3.connect(str(TODO_DB))
     try:
         cur = conn.cursor()
@@ -502,8 +507,13 @@ def complete_periodic_occurrence(occ_id: int) -> tuple[bool, str]:
             return True, f"⚠️  FIN-{occ_id} 已完成"
 
         cur.execute(
-            "UPDATE periodic_occurrences SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (occ_id,),
+            """
+            UPDATE periodic_occurrences
+            SET status = 'completed', completed_at = CURRENT_TIMESTAMP,
+                completion_mode = ?, special_handler_result = COALESCE(?, special_handler_result)
+            WHERE id = ?
+            """,
+            (completion_mode, special_handler_result, occ_id),
         )
         cur.execute("SELECT cycle_type FROM periodic_tasks WHERE id = ?", (task_id,))
         cycle_type_row = cur.fetchone()
@@ -515,11 +525,7 @@ def complete_periodic_occurrence(occ_id: int) -> tuple[bool, str]:
     finally:
         conn.close()
 
-    subprocess.run(
-        [PYTHON_BIN, str(MANAGER_SCRIPT), '--complete-activity', str(task_id)],
-        capture_output=True,
-        text=True,
-    )
+    subprocess.run([PYTHON_BIN, str(MANAGER_SCRIPT), '--complete-activity', str(task_id)], capture_output=True, text=True)
     return True, f"✅ 已完成 FIN-{occ_id}（任务ID {task_id}）"
 
 
@@ -566,9 +572,24 @@ def complete_overdue_tasks(now: datetime | None = None, dry_run: bool = False) -
     for task in periodic:
         handled.append(task['identifier'])
         if dry_run:
-            simulated.append(f"{task['identifier']} {task['name']} @ {task['time_of_day']}")
+            label = f"{task['identifier']} {task['name']} @ {task['time_of_day']}"
+            if task.get('special_handler'):
+                label += f" [{task['special_handler']}]"
+            simulated.append(label)
             continue
-        ok, message = complete_periodic_occurrence(task['occurrence_id'])
+
+        completion_mode = 'manual'
+        special_result = None
+        if task.get('special_handler'):
+            ok, message = run_special_handler(task.get('special_handler'), task.get('handler_payload'), task['name'], now=now)
+            if not ok:
+                errors.append(message)
+                continue
+            special_result = message
+            completion_mode = 'fallback_handler'
+            completed.append(f"📝 {message}")
+
+        ok, message = complete_periodic_occurrence(task['occurrence_id'], completion_mode=completion_mode, special_handler_result=special_result)
         if ok:
             completed.append(message)
         else:
@@ -609,7 +630,6 @@ def complete_overdue_tasks(now: datetime | None = None, dry_run: bool = False) -
 
 
 def cmd_list():
-    """列出所有待办（合并视图）"""
     ensure_today_occurrences()
 
     periodic = get_periodic_pending()
@@ -637,15 +657,16 @@ def cmd_list():
 
 
 def cmd_add(text, category='Inbox', cycle_type='once', **kwargs):
-    """添加任务（自动路由：非 once 周期任务使用 manager，once 或简单任务直接插入）"""
-    if cycle_type != 'once':
+    is_scheduled_once = cycle_type == 'once' and kwargs.get('start_date')
+    is_scheduled_recurring = cycle_type != 'once'
+    if is_scheduled_once or is_scheduled_recurring:
         args = [
             PYTHON_BIN, str(MANAGER_SCRIPT),
             '--add',
             '--name', text,
             '--category', category,
             '--cycle-type', cycle_type,
-            '--time', kwargs.get('time', '09:00')
+            '--time', kwargs.get('time', '09:00'),
         ]
         if 'weekday' in kwargs:
             args.extend(['--weekday', str(kwargs['weekday'])])
@@ -655,16 +676,26 @@ def cmd_add(text, category='Inbox', cycle_type='once', **kwargs):
             args.extend(['--range-start', str(kwargs['range_start']), '--range-end', str(kwargs['range_end'])])
         if 'n_per_month' in kwargs:
             args.extend(['--n-per-month', str(kwargs['n_per_month'])])
+        if 'dates_list' in kwargs:
+            args.extend(['--dates-list', str(kwargs['dates_list'])])
+        if 'start_date' in kwargs:
+            args.extend(['--start-date', kwargs['start_date']])
         if 'end_date' in kwargs:
             args.extend(['--end-date', kwargs['end_date']])
         if 'reminder_template' in kwargs:
             args.extend(['--reminder-template', kwargs['reminder_template']])
+        if 'task_kind' in kwargs:
+            args.extend(['--task-kind', kwargs['task_kind']])
+        if 'special_handler' in kwargs and kwargs['special_handler']:
+            args.extend(['--special-handler', kwargs['special_handler']])
+        if 'handler_payload' in kwargs and kwargs['handler_payload']:
+            args.extend(['--handler-payload', kwargs['handler_payload']])
 
         result = subprocess.run(args, capture_output=True, text=True)
         if result.returncode == 0:
             print(f"✅ 已添加周期任务：{text}")
         else:
-            print(f"❌ 添加失败：{result.stderr}")
+            print(f"❌ 添加失败：{result.stderr or result.stdout}")
     else:
         try:
             conn = sqlite3.connect(str(TODO_DB))
@@ -694,7 +725,6 @@ def cmd_add(text, category='Inbox', cycle_type='once', **kwargs):
 
 
 def cmd_complete(identifier):
-    """完成待办"""
     ok, message = complete_identifier(identifier)
     print(message)
     if not ok:
@@ -723,7 +753,6 @@ def cmd_complete_overdue(now_override: str | None = None, dry_run: bool = False)
 
 
 def cmd_skip(identifier):
-    """跳过待办（不扣减配额）"""
     if identifier.startswith('FIN-'):
         occ_id = int(identifier[4:])
         try:
@@ -751,10 +780,7 @@ def cmd_skip(identifier):
             job_name = cur.fetchone()[0]
             if job_name:
                 try:
-                    subprocess.run(
-                        [OPENCLAW_BIN, "cron", "remove", job_name],
-                        capture_output=True, text=True, timeout=10
-                    )
+                    subprocess.run([OPENCLAW_BIN, "cron", "remove", job_name], capture_output=True, text=True, timeout=10)
                 except Exception:
                     pass
 
@@ -791,14 +817,14 @@ def cmd_skip(identifier):
 
 
 def cmd_show(identifier):
-    """显示任务详情"""
     if identifier.startswith('FIN-'):
         occ_id = int(identifier[4:])
         conn = sqlite3.connect(str(TODO_DB))
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT t.name, t.cycle_type, o.date, o.status, o.reminder_job_id
+            SELECT t.name, t.cycle_type, t.special_handler, o.date, o.status,
+                   o.reminder_job_id, o.completion_mode, o.special_handler_result
             FROM periodic_occurrences o
             JOIN periodic_tasks t ON o.task_id = t.id
             WHERE o.id = ?
@@ -808,11 +834,14 @@ def cmd_show(identifier):
         row = cur.fetchone()
         conn.close()
         if row:
-            name, cycle_type, date_str, status, job_id = row
+            name, cycle_type, special_handler, date_str, status, job_id, completion_mode, special_handler_result = row
             print(f"【周期任务】{name}")
             print(f"周期类型：{cycle_type}")
             print(f"日期：{date_str}")
             print(f"状态：{status}")
+            print(f"special_handler：{special_handler or '无'}")
+            print(f"completion_mode：{completion_mode or '无'}")
+            print(f"handler_result：{special_handler_result or '无'}")
             print(f"提醒任务：{job_id or '无'}")
         else:
             print(f"❌ 未找到 FIN-{occ_id}")
@@ -874,6 +903,7 @@ def main():
                 'category': args.category,
                 'cycle_type': args.cycle_type,
                 'time': args.time_of_day,
+                'task_kind': args.task_kind,
             }
             if args.weekday is not None:
                 kwargs['weekday'] = args.weekday
@@ -885,10 +915,18 @@ def main():
                 kwargs['range_end'] = args.range_end
             if args.n_per_month is not None:
                 kwargs['n_per_month'] = args.n_per_month
+            if args.dates_list is not None:
+                kwargs['dates_list'] = args.dates_list
+            if args.start_date is not None:
+                kwargs['start_date'] = args.start_date
             if args.end_date is not None:
                 kwargs['end_date'] = args.end_date
             if args.reminder_template is not None:
                 kwargs['reminder_template'] = args.reminder_template
+            if args.special_handler is not None:
+                kwargs['special_handler'] = args.special_handler
+            if args.handler_payload is not None:
+                kwargs['handler_payload'] = args.handler_payload
 
             cmd_add(args.name, **kwargs)
         elif args.command == 'skip':

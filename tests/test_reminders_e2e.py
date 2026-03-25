@@ -49,13 +49,22 @@ def create_test_db(db_path: Path):
             range_start INTEGER,
             range_end INTEGER,
             n_per_month INTEGER,
-            time_of_day TEXT NOT NULL,
+            time_of_day TEXT,
             event_time TEXT,
             timezone TEXT DEFAULT 'Asia/Shanghai',
             is_active INTEGER DEFAULT 1,
             count_current_month INTEGER DEFAULT 0,
             end_date TEXT,
             reminder_template TEXT,
+            dates_list TEXT,
+            task_kind TEXT DEFAULT 'scheduled',
+            source TEXT DEFAULT 'chronos',
+            legacy_entry_id INTEGER,
+            special_handler TEXT,
+            handler_payload TEXT,
+            start_date TEXT,
+            delivery_target TEXT,
+            delivery_mode TEXT,
             created_at TEXT,
             updated_at TEXT
         )
@@ -70,7 +79,12 @@ def create_test_db(db_path: Path):
             status TEXT NOT NULL DEFAULT 'pending',
             reminder_job_id TEXT,
             is_auto_completed INTEGER DEFAULT 0,
-            completed_at TEXT
+            completed_at TEXT,
+            completion_mode TEXT,
+            special_handler_result TEXT,
+            scheduled_time TEXT,
+            scheduled_at TEXT,
+            legacy_entry_id INTEGER
         )
         """
     )
@@ -91,10 +105,10 @@ class ReminderEndToEndTests(unittest.TestCase):
             """
             INSERT INTO periodic_tasks (
                 id, name, category, cycle_type, weekday, time_of_day, event_time, timezone,
-                is_active, count_current_month, end_date, reminder_template, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                is_active, count_current_month, end_date, reminder_template, task_kind, source, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """,
-            (1, "测试提醒", "Inbox", "daily", None, "10:00", "10:00", "Asia/Shanghai", 1, 0, None, None),
+            (1, "测试提醒", "Inbox", "daily", None, "10:00", "10:00", "Asia/Shanghai", 1, 0, None, None, 'scheduled', 'chronos'),
         )
         self.conn.commit()
 
@@ -116,12 +130,14 @@ class ReminderEndToEndTests(unittest.TestCase):
 
             self.assertEqual(scheduled, 1)
             row = self.conn.execute(
-                "SELECT status, reminder_job_id FROM periodic_occurrences WHERE task_id = 1 AND date = ?",
+                "SELECT status, reminder_job_id, scheduled_time, scheduled_at FROM periodic_occurrences WHERE task_id = 1 AND date = ?",
                 ("2026-03-23",),
             ).fetchone()
             self.assertIsNotNone(row)
             self.assertEqual(row["status"], "pending")
             self.assertEqual(row["reminder_job_id"], "task_reminder_1_20260323")
+            self.assertEqual(row["scheduled_time"], "10:00")
+            self.assertEqual(row["scheduled_at"], "2026-03-23T10:00:00")
 
             cmd = mock_run.call_args.args[0]
             self.assertIn("--announce", cmd)
@@ -190,6 +206,29 @@ class ReminderEndToEndTests(unittest.TestCase):
             cmd = mock_run.call_args.args[0]
             self.assertEqual(cmd[:3], [self.module.build_cron_remove_command("task_reminder_1_20260322")[0], "cron", "remove"])
             self.assertEqual(cmd[3], "task_reminder_1_20260322")
+
+    def test_ensure_today_occurrences_handles_once_start_date(self):
+        self.conn.execute(
+            """
+            INSERT INTO periodic_tasks (
+                id, name, category, cycle_type, time_of_day, event_time, timezone,
+                is_active, count_current_month, start_date, task_kind, source, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (2, "一次性计划", "Inbox", "once", "11:00", "11:00", "Asia/Shanghai", 1, 0, '2026-03-23', 'scheduled', 'chronos'),
+        )
+        self.conn.commit()
+
+        with patch.object(self.module, "to_shanghai_date", return_value=date(2026, 3, 23)):
+            count = self.manager.ensure_today_occurrences()
+
+        self.assertEqual(count, 2)
+        row = self.conn.execute(
+            "SELECT scheduled_time, scheduled_at FROM periodic_occurrences WHERE task_id = 2 AND date = ?",
+            ("2026-03-23",),
+        ).fetchone()
+        self.assertEqual(row["scheduled_time"], "11:00")
+        self.assertEqual(row["scheduled_at"], "2026-03-23T11:00:00")
 
 
 if __name__ == "__main__":
