@@ -12,10 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scripts/check_git_hygiene.sh` to fail fast when tracked `__pycache__` or `*.pyc` artifacts leak into the repo.
 - `core/openclaw_cron.py` helper to centralize OpenClaw cron add/remove command construction.
 - `scripts/schema_preflight.py` to verify the actual runtime DB, required tables, key constraints, duplicate occurrence groups, and invalid statuses before any schema migration.
+- `scripts/migrate_legacy_entries.py` for conservative Phase-2 migration of deterministic legacy recurring/system rows from `entries` into canonical task metadata.
+- `tests/test_migrate_legacy_entries.py` covering deterministic link/create decisions, Meta-Review migration, and explicit manual-review quarantine for unsupported every-N-hours rows.
 
 ### Changed
 - Reminder cron creation/removal now goes through a shared helper instead of duplicating argv construction.
 - README verification steps now include config diagnostics, schema preflight, full test discovery, legacy cron dry-run cleanup, and git hygiene checks.
+- Phase-2 docs now document the conservative migration policy, including `legacy_entry_id` / `source` traceability and the deliberate refusal to auto-migrate unsupported cadences such as `每 4 小时 ...`.
 
 ### Fixed
 - Removed previously tracked Python cache artifacts from git history going forward.

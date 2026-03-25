@@ -25,6 +25,23 @@ python3 skills/chronos/scripts/todo.py add "Meta-Review fallback" \
   --task-kind system \
   --special-handler meta_review_fallback
 
+python3 skills/chronos/scripts/migrate_legacy_entries.py --db /home/ubuntu/.openclaw/workspace/todo.db
+python3 skills/chronos/scripts/migrate_legacy_entries.py --db /home/ubuntu/.openclaw/workspace/todo.db --apply
 python3 skills/chronos/scripts/todo.py complete-overdue --dry-run
 python3 skills/chronos/scripts/schema_preflight.py
 ```
+
+## Legacy migration policy
+
+Phase 2 adds `scripts/migrate_legacy_entries.py` for conservative migration out of `entries`.
+
+What it will do automatically:
+- link obvious legacy rows to an already-existing canonical task by deterministic normalized name
+- create an explicit `task_kind=system` + `special_handler=meta_review_fallback` task for legacy Meta-Review rows
+- create canonical tasks for simple bracketed recurring rows only when the schedule is deterministic
+
+What it will not do automatically:
+- ambiguous free-text rows
+- unsupported cadences like `每 4 小时 ...` (these stay in manual review until a richer cadence model or another owner is chosen)
+
+Traceability is preserved through `periodic_tasks.legacy_entry_id` and `source` (`legacy_entries_linked` / `legacy_entries_migrated`).
