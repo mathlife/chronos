@@ -47,7 +47,18 @@ class PathsTests(unittest.TestCase):
                 clear=False,
             ):
                 reloaded = self._load_paths_module()
+                self.assertEqual(reloaded.WORKSPACE, workspace)
                 self.assertEqual(reloaded.TODO_DB, custom_db)
+
+    def test_workspace_env_is_respected_even_without_todo_db(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+
+            with patch.dict(os.environ, {"CHRONOS_WORKSPACE": str(workspace)}, clear=False):
+                reloaded = self._load_paths_module()
+                self.assertEqual(reloaded.WORKSPACE, workspace)
+                self.assertEqual(reloaded.TODO_DB, workspace / "todo.db")
 
 
 if __name__ == "__main__":

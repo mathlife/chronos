@@ -11,18 +11,30 @@ SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 _DEFAULT_WORKSPACE = Path.home() / ".openclaw" / "workspace"
 
 
-def _workspace_candidates() -> list[Path]:
+def _explicit_workspace_candidates() -> list[Path]:
     candidates: list[Path] = []
     for env_name in ("CHRONOS_WORKSPACE", "OPENCLAW_WORKSPACE"):
         raw_value = os.getenv(env_name)
         if raw_value:
             candidates.append(Path(raw_value).expanduser())
+    return candidates
+
+
+def _workspace_candidates() -> list[Path]:
+    candidates = _explicit_workspace_candidates()
     candidates.extend([_DEFAULT_WORKSPACE, PROJECT_ROOT])
     return candidates
 
 
 def resolve_workspace() -> Path:
     """Return the best workspace root for the current runtime."""
+    explicit_candidates = _explicit_workspace_candidates()
+    if explicit_candidates:
+        for candidate in explicit_candidates:
+            if candidate.exists():
+                return candidate
+        return explicit_candidates[0]
+
     for candidate in _workspace_candidates():
         if (candidate / "todo.db").exists():
             return candidate
