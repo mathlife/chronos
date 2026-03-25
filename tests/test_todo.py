@@ -192,6 +192,8 @@ class TodoOverdueCompletionTests(unittest.TestCase):
                 name TEXT NOT NULL,
                 category TEXT,
                 cycle_type TEXT NOT NULL,
+                weekday INTEGER,
+                n_per_month INTEGER,
                 interval_hours INTEGER,
                 time_of_day TEXT,
                 count_current_month INTEGER DEFAULT 0,
@@ -384,6 +386,31 @@ class TodoOverdueCompletionTests(unittest.TestCase):
         self.assertEqual(special_status, 'pending')
         self.assertEqual([row[0] for row in sync_rows], ['pending', 'pending', 'pending'])
         self.assertFalse((self.workspace / 'memory' / '2026-03-25.md').exists())
+
+    def test_complete_periodic_occurrence_auto_completes_rest_of_month_for_monthly_quota_task(self):
+        conn = self._connect()
+        conn.execute("INSERT INTO periodic_tasks (id, name, category, cycle_type, n_per_month, time_of_day, count_current_month) VALUES (4, '福建农行秒杀京东卡', 'System', 'monthly_n_times', 1, '09:00', 0)")
+        conn.execute("INSERT INTO periodic_occurrences (id, task_id, date, status, scheduled_time) VALUES (401, 4, '2026-03-25', 'pending', '09:00')")
+        conn.execute("INSERT INTO periodic_occurrences (id, task_id, date, status, scheduled_time) VALUES (402, 4, '2026-03-26', 'pending', '09:00')")
+        conn.execute("INSERT INTO periodic_occurrences (id, task_id, date, status, scheduled_time) VALUES (403, 4, '2026-03-31', 'reminded', '09:00')")
+        conn.commit()
+        conn.close()
+
+        with patch.object(todo_module, 'TODO_DB', self.db_path):
+            ok, message = todo_module.complete_periodic_occurrence(401)
+
+        self.assertTrue(ok)
+        self.assertIn('已完成 FIN-401', message)
+
+        conn = self._connect()
+        task_row = conn.execute("SELECT count_current_month FROM periodic_tasks WHERE id = 4").fetchone()
+        occ_rows = conn.execute("SELECT id, status, is_auto_completed, completion_mode FROM periodic_occurrences WHERE task_id = 4 ORDER BY id").fetchall()
+        conn.close()
+
+        self.assertEqual(task_row[0], 1)
+        self.assertEqual(occ_rows[0], (401, 'completed', 0, 'manual'))
+        self.assertEqual(occ_rows[1], (402, 'completed', 1, 'auto_quota'))
+        self.assertEqual(occ_rows[2], (403, 'completed', 1, 'auto_quota'))
 
 
 if __name__ == "__main__":

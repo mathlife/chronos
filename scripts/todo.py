@@ -89,8 +89,8 @@ def validate_add_args(args: argparse.Namespace) -> None:
         raise ValueError("monthly_fixed tasks require --day")
     if args.cycle_type == 'monthly_range' and (args.range_start is None or args.range_end is None):
         raise ValueError("monthly_range tasks require --range-start and --range-end")
-    if args.cycle_type == 'monthly_n_times' and (args.weekday is None or args.n_per_month is None):
-        raise ValueError("monthly_n_times tasks require --weekday and --n-per-month")
+    if args.cycle_type == 'monthly_n_times' and args.n_per_month is None:
+        raise ValueError("monthly_n_times tasks require --n-per-month")
     if args.cycle_type == 'monthly_dates' and not args.dates_list:
         raise ValueError("monthly_dates tasks require --dates-list")
 
@@ -606,11 +606,32 @@ def complete_periodic_occurrence(occ_id: int, *, completion_mode: str = 'manual'
             """,
             (completion_mode, special_handler_result, occ_id),
         )
-        cur.execute("SELECT cycle_type FROM periodic_tasks WHERE id = ?", (task_id,))
+        task_columns = {row[1] for row in cur.execute("PRAGMA table_info(periodic_tasks)").fetchall()}
+        select_columns = ['cycle_type']
+        if 'n_per_month' in task_columns:
+            select_columns.append('n_per_month')
+        if 'count_current_month' in task_columns:
+            select_columns.append('count_current_month')
+        cur.execute(f"SELECT {', '.join(select_columns)} FROM periodic_tasks WHERE id = ?", (task_id,))
         cycle_type_row = cur.fetchone()
         cycle_type = cycle_type_row[0] if cycle_type_row else None
         if cycle_type == 'monthly_n_times':
-            cur.execute("UPDATE periodic_tasks SET count_current_month = count_current_month + 1 WHERE id = ?", (task_id,))
+            if 'count_current_month' in task_columns:
+                cur.execute("UPDATE periodic_tasks SET count_current_month = count_current_month + 1 WHERE id = ?", (task_id,))
+            n_per_month = cycle_type_row[1] if cycle_type_row and 'n_per_month' in task_columns else None
+            current_count_index = 2 if 'n_per_month' in task_columns and 'count_current_month' in task_columns else 1
+            current_count = (cycle_type_row[current_count_index] if cycle_type_row and 'count_current_month' in task_columns else 0) or 0
+            if n_per_month is not None and current_count + 1 >= n_per_month:
+                cur.execute(
+                    """
+                    UPDATE periodic_occurrences
+                    SET status = 'completed', is_auto_completed = 1,
+                        completion_mode = COALESCE(completion_mode, 'auto_quota')
+                    WHERE task_id = ? AND status IN ('pending', 'reminded')
+                      AND strftime('%Y-%m', date) = strftime('%Y-%m', ?)
+                    """,
+                    (task_id, datetime.now().date().isoformat()),
+                )
 
         conn.commit()
     finally:

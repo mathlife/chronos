@@ -203,7 +203,11 @@ def build_simple_schedule_task(entry: sqlite3.Row) -> dict[str, Any] | None:
     weekday = parse_weekday(schedule)
 
     if '每日' in schedule or '每天' in schedule:
-        params['cycle_type'] = 'daily'
+        if '每月' in label:
+            params['cycle_type'] = 'monthly_n_times'
+            params['n_per_month'] = 1
+        else:
+            params['cycle_type'] = 'daily'
         return params
 
     if '每周' in schedule and weekday is not None:

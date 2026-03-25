@@ -96,9 +96,7 @@ class TaskScheduler:
             return self._in_monthly_range(today)
 
         if self.task.cycle_type == 'monthly_n_times':
-            if self.task.weekday is None:
-                return False
-            if today.weekday() != self.task.weekday:
+            if self.task.weekday is not None and today.weekday() != self.task.weekday:
                 return False
             if self.task.count_current_month >= (self.task.n_per_month or 0):
                 return False
@@ -269,8 +267,10 @@ class TaskScheduler:
 
         elif cycle_type == 'monthly_n_times':
             if self.task.weekday is None:
-                return []
-            dates = get_weekdays_in_month(year, month, self.task.weekday)
+                days_in_month = calendar.monthrange(year, month)[1]
+                dates = [date(year, month, d) for d in range(1, days_in_month + 1)]
+            else:
+                dates = get_weekdays_in_month(year, month, self.task.weekday)
 
         elif cycle_type == 'monthly_dates':
             dates = self._get_monthly_dates(year, month)

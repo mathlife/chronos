@@ -19,11 +19,12 @@ description: 通用周期任务管理器 - 支持6种周期类型、每月N次�
 - `weekly`：每周（指定星期几）
 - `monthly_fixed`：每月固定日期（如15号）
 - `monthly_range`：每月区间（如11号→5号，跨月）
-- `monthly_n_times`：每月限次（如每周三，每月最多2次）
+- `monthly_n_times`：每月限次（如每周三每月最多2次，或 `weekday` 留空表示“每天都可提醒，但本月完成满额后停止”）
 - `monthly_dates`：每月多个固定日期（如 `1,15,31`）
 
 ### 智能配额
 - 仅 `completed` 计数，`skip` 不计
+- `monthly_n_times` 若 `weekday` 为空，则按“每日可提醒”展开，但仍受每月配额约束
 - 配额用满后自动完成当月剩余活动日
 - 每月1号自动重置计数器
 
@@ -75,6 +76,12 @@ python3 skills/chronos/scripts/todo.py add "周三抢券" \
   --weekday 2 \
   --n-per-month 2 \
   --time 10:00
+
+# 添加“每天都可提醒，但本月完成一次后本月不再提醒”的任务
+python3 skills/chronos/scripts/todo.py add "福建农行秒杀京东卡" \
+  --cycle-type monthly_n_times \
+  --n-per-month 1 \
+  --time 09:00
 
 # 添加每4小时任务（08:00 作为锚点；当天展开为 00/04/08/12/16/20）
 python3 skills/chronos/scripts/todo.py add "同步 subagent 记忆" \

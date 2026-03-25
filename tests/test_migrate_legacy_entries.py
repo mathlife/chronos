@@ -99,6 +99,9 @@ class LegacyMigrationScriptTests(unittest.TestCase):
             "INSERT INTO entries (id, text, status, group_id, created_at) VALUES (21, '[每周重复] 华夏精彩Fun肆日 (每周四 10:00)', 'done', 2, '2026-03-10 10:00:00')"
         )
         conn.execute(
+            "INSERT INTO entries (id, text, status, group_id, created_at) VALUES (22, '[每月重复] 福建农行秒杀京东卡 (每日 9:00)', 'done', 2, '2026-03-03 09:00:00')"
+        )
+        conn.execute(
             "INSERT INTO periodic_tasks (id, name, category, cycle_type, weekday, time_of_day, event_time, source) VALUES (2, '华夏精彩Fun肆日', '活动提醒', 'weekly', 3, '10:00', '10:00', 'chronos')"
         )
         conn.commit()
@@ -120,6 +123,10 @@ class LegacyMigrationScriptTests(unittest.TestCase):
         self.assertEqual(by_id[15].task_params['cycle_type'], 'hourly')
         self.assertEqual(by_id[15].task_params['interval_hours'], 4)
         self.assertEqual(by_id[15].task_params['special_handler'], 'sync_subagent_memory')
+        self.assertEqual(by_id[22].action, 'create_task')
+        self.assertEqual(by_id[22].task_params['cycle_type'], 'monthly_n_times')
+        self.assertEqual(by_id[22].task_params['n_per_month'], 1)
+        self.assertIsNone(by_id[22].task_params.get('weekday'))
 
     def test_apply_links_existing_and_creates_meta_review_and_hourly_sync_tasks(self):
         conn = migrate_module.connect(str(self.db_path))
@@ -138,6 +145,9 @@ class LegacyMigrationScriptTests(unittest.TestCase):
             ).fetchone()
             hourly_task = conn.execute(
                 "SELECT id, cycle_type, interval_hours, task_kind, source, legacy_entry_id, special_handler, time_of_day, handler_payload FROM periodic_tasks WHERE special_handler = 'sync_subagent_memory'"
+            ).fetchone()
+            monthly_quota_task = conn.execute(
+                "SELECT id, cycle_type, weekday, n_per_month, task_kind, source, legacy_entry_id, time_of_day FROM periodic_tasks WHERE legacy_entry_id = 22"
             ).fetchone()
             occs = conn.execute(
                 "SELECT task_id, date, status, scheduled_time, legacy_entry_id FROM periodic_occurrences WHERE task_id = ? ORDER BY scheduled_time",
@@ -172,6 +182,15 @@ class LegacyMigrationScriptTests(unittest.TestCase):
         self.assertEqual(hourly_payload['session_filter'], ':subagent:')
         self.assertEqual([row[3] for row in occs], ['00:00', '04:00', '08:00', '12:00', '16:00', '20:00'])
         self.assertTrue(all(row[4] == 15 for row in occs))
+
+        self.assertIsNotNone(monthly_quota_task)
+        self.assertEqual(monthly_quota_task[1], 'monthly_n_times')
+        self.assertIsNone(monthly_quota_task[2])
+        self.assertEqual(monthly_quota_task[3], 1)
+        self.assertEqual(monthly_quota_task[4], 'scheduled')
+        self.assertEqual(monthly_quota_task[5], 'legacy_entries_migrated')
+        self.assertEqual(monthly_quota_task[6], 22)
+        self.assertEqual(monthly_quota_task[7], '09:00')
 
         notes = [item.note for item in applied]
         self.assertTrue(any('linked entry 21 -> task 2' in note for note in notes))

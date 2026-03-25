@@ -10,6 +10,7 @@ Chronos is a lightweight recurring-task engine backed by `periodic_tasks` + `per
 - Scheduled `once` tasks with an explicit `start_date` now use canonical task storage.
 - `monthly_dates` is a supported cycle type.
 - `hourly` is a supported cycle type, with `interval_hours` + `time_of_day` anchor semantics.
+- `monthly_n_times` can now run on either a weekday cadence (`weekday=0..6`) or a daily cadence (`weekday=NULL`) while still enforcing a monthly completion quota.
 - Special system behaviors should live in explicit task metadata (`special_handler`) instead of free-text regex whenever possible.
 
 ## Quick examples
@@ -58,6 +59,19 @@ Expansion rule for each active day:
 This is conservative and matches the legacy `每 4 小时：同步 subagent 记忆` expectation without introducing cross-day offset state.
 
 When `complete-overdue` processes multiple overdue hourly occurrences for the same task on the same day and that task has a `special_handler`, Chronos now runs the handler once for that task/day batch, then marks every overdue occurrence completed with `completion_mode=fallback_handler_merged` and a per-occurrence `special_handler_result` trail (`merge_key`, merged index/count, source occurrence).
+
+## Monthly quota over daily cadence
+
+For tasks like `福建农行秒杀京东卡`, the intended semantic is not plain `daily`; it is:
+- remind on a daily cadence while the month quota is still unused
+- once any occurrence is completed, consume the monthly quota
+- auto-complete the rest of that month's pending/reminded occurrences so no more reminders fire
+- resume naturally after the monthly counter resets on the next month boundary
+
+This is represented as:
+- `cycle_type=monthly_n_times`
+- `n_per_month=1`
+- `weekday=NULL` to mean daily cadence instead of weekly cadence
 
 ## Legacy migration policy
 

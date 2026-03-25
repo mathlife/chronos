@@ -82,8 +82,8 @@ def validate_add_params(args: argparse.Namespace) -> None:
         raise ValueError("monthly_fixed tasks require --day")
     if args.cycle_type == 'monthly_range' and (args.range_start is None or args.range_end is None):
         raise ValueError("monthly_range tasks require --range-start and --range-end")
-    if args.cycle_type == 'monthly_n_times' and (args.weekday is None or args.n_per_month is None):
-        raise ValueError("monthly_n_times tasks require --weekday and --n-per-month")
+    if args.cycle_type == 'monthly_n_times' and args.n_per_month is None:
+        raise ValueError("monthly_n_times tasks require --n-per-month")
     if args.cycle_type == 'monthly_dates' and not args.dates_list:
         raise ValueError("monthly_dates tasks require --dates-list")
 
@@ -362,10 +362,23 @@ class PeriodicTaskManager:
                 row = cur.fetchone()
                 if row:
                     task_id = row[0]
-                    cur = self.db.execute("SELECT cycle_type FROM periodic_tasks WHERE id = ?", (task_id,))
+                    cur = self.db.execute("SELECT cycle_type, n_per_month, count_current_month FROM periodic_tasks WHERE id = ?", (task_id,))
                     cycle_type_row = cur.fetchone()
                     if cycle_type_row and cycle_type_row[0] == 'monthly_n_times':
                         self.db.execute("UPDATE periodic_tasks SET count_current_month = count_current_month + 1 WHERE id = ?", (task_id,))
+                        n_per_month = cycle_type_row[1]
+                        current_count = (cycle_type_row[2] or 0)
+                        if n_per_month is not None and current_count + 1 >= n_per_month:
+                            self.db.execute(
+                                """
+                                UPDATE periodic_occurrences
+                                SET status = 'completed', is_auto_completed = 1,
+                                    completion_mode = COALESCE(completion_mode, 'auto_quota')
+                                WHERE task_id = ? AND status IN ('pending', 'reminded')
+                                  AND strftime('%Y-%m', date) = strftime('%Y-%m', 'now', 'localtime')
+                                """,
+                                (task_id,),
+                            )
                         db_commit()
             return affected > 0
 

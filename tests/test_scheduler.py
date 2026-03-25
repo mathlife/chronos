@@ -87,6 +87,28 @@ class TaskSchedulerTests(unittest.TestCase):
         self.assertFalse(scheduler.should_remind_today())
         self.assertEqual(scheduler.get_hourly_schedule_for_day(date(2026, 3, 15)), [])
 
+    def test_monthly_n_times_can_use_daily_cadence_without_weekday(self):
+        task = make_task(cycle_type="monthly_n_times", weekday=None, n_per_month=1, count_current_month=0)
+        scheduler = TaskScheduler(task, date(2026, 3, 15))
+
+        self.assertTrue(scheduler.should_remind_today())
+        self.assertEqual(scheduler.get_occurrences_for_month(2026, 3)[0], date(2026, 3, 1))
+        self.assertEqual(scheduler.get_occurrences_for_month(2026, 3)[-1], date(2026, 3, 31))
+
+    def test_monthly_n_times_daily_cadence_stops_after_quota(self):
+        task = make_task(cycle_type="monthly_n_times", weekday=None, n_per_month=1, count_current_month=1)
+        scheduler = TaskScheduler(task, date(2026, 3, 16))
+
+        self.assertFalse(scheduler.should_remind_today())
+        self.assertEqual(scheduler.get_pending_dates_in_month(2026, 3, []), [])
+
+    def test_monthly_n_times_daily_cadence_can_resume_next_month_after_counter_reset(self):
+        task = make_task(cycle_type="monthly_n_times", weekday=None, n_per_month=1, count_current_month=0, start_date="2026-03-03")
+        scheduler = TaskScheduler(task, date(2026, 4, 1))
+
+        self.assertTrue(scheduler.should_remind_today())
+        self.assertIn(date(2026, 4, 1), scheduler.get_occurrences_for_month(2026, 4))
+
 
 if __name__ == "__main__":
     unittest.main()
