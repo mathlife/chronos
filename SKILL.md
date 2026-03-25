@@ -35,6 +35,7 @@ description: 通用周期任务管理器 - 支持6种周期类型、每月N次�
 - `todo.py list`：合并显示周期任务和普通任务
 - `todo.py add`：智能路由（周期任务 → manager，一次性 → entries）
 - `todo.py complete`：完成单个 occurrence 或普通任务
+- `todo.py complete-overdue`：统一补完成今天已过时的计划任务（周期 occurrence + legacy entries）
 - `todo.py show`：查看详情
 - `todo.py skip`：跳过任务且不消耗 monthly_n_times 配额
 
@@ -69,6 +70,10 @@ python3 skills/chronos/scripts/todo.py add "买牛奶" --category 生活
 # 完成任务
 python3 skills/chronos/scripts/todo.py complete FIN-123  # 周期任务 occurrence
 python3 skills/chronos/scripts/todo.py complete 45      # 普通任务 ID
+
+# 统一补完成今天已经过时的计划任务
+python3 skills/chronos/scripts/todo.py complete-overdue
+python3 skills/chronos/scripts/todo.py complete-overdue --dry-run
 
 # 跳过任务（不影响配额）
 python3 skills/chronos/scripts/todo.py skip FIN-123     # 周期任务

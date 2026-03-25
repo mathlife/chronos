@@ -42,6 +42,10 @@ python3 skills/chronos/scripts/todo.py add "任务名" \
 # 完成任务
 python3 skills/chronos/scripts/todo.py complete <ID|FIN-occ_id>
 
+# 补完成今天已经过时的计划任务（周期 occurrence + 旧 entries）
+python3 skills/chronos/scripts/todo.py complete-overdue
+python3 skills/chronos/scripts/todo.py complete-overdue --dry-run
+
 # 查看详情
 python3 skills/chronos/scripts/todo.py show <ID|FIN-occ_id>
 ```
