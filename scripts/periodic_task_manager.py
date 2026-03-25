@@ -444,59 +444,81 @@ class PeriodicTaskManager:
         return count
 
     def _build_today_todo_snapshot(self, today: date) -> str:
-        periodic_rows = self.db.execute(
+        active_periodic_rows = self.db.execute(
             """
             SELECT o.id, o.date, o.status, t.name, t.cycle_type
             FROM periodic_occurrences o
             JOIN periodic_tasks t ON o.task_id = t.id
-            WHERE o.date = ? AND o.status IN ('pending', 'reminded', 'skipped', 'completed')
+            WHERE o.date = ? AND o.status IN ('pending', 'reminded')
+            ORDER BY t.time_of_day, t.name, o.id
+            """,
+            (today.isoformat(),),
+        ).fetchall()
+        skipped_periodic_rows = self.db.execute(
+            """
+            SELECT o.id, o.date, o.status, t.name, t.cycle_type
+            FROM periodic_occurrences o
+            JOIN periodic_tasks t ON o.task_id = t.id
+            WHERE o.date = ? AND o.status = 'skipped'
             ORDER BY t.time_of_day, t.name, o.id
             """,
             (today.isoformat(),),
         ).fetchall()
 
-        simple_rows = self.db.execute(
+        active_simple_rows = self.db.execute(
             """
             SELECT e.id, e.text, e.status, COALESCE(g.name, 'Inbox') AS group_name
             FROM entries e
             LEFT JOIN groups g ON e.group_id = g.id
-            WHERE e.status IN ('pending', 'in_progress', 'skipped')
+            WHERE e.status IN ('pending', 'in_progress')
+            ORDER BY e.id
+            """
+        ).fetchall()
+        skipped_simple_rows = self.db.execute(
+            """
+            SELECT e.id, e.text, e.status, COALESCE(g.name, 'Inbox') AS group_name
+            FROM entries e
+            LEFT JOIN groups g ON e.group_id = g.id
+            WHERE e.status = 'skipped'
             ORDER BY e.id
             """
         ).fetchall()
 
         lines = [f"📋 今日待办总览（{today.isoformat()}）"]
-        if periodic_rows:
+        if active_periodic_rows:
             lines.append("")
             lines.append("【今日周期任务】")
-            for row in periodic_rows:
+            for row in active_periodic_rows:
                 status = row['status']
                 if status == 'reminded':
                     status = '已提醒'
-                elif status == 'skipped':
-                    status = '已跳过'
-                elif status == 'completed':
-                    status = '已完成'
                 lines.append(f"- FIN-{row['id']} | {row['name']} ({row['cycle_type']}) | {status}")
         else:
             lines.append("")
             lines.append("【今日周期任务】")
             lines.append("- 无")
 
-        if simple_rows:
+        if active_simple_rows:
             lines.append("")
             lines.append("【其他待办】")
-            for row in simple_rows:
+            for row in active_simple_rows:
                 status = row['status']
                 if status == 'in_progress':
                     status = '进行中'
-                elif status == 'skipped':
-                    status = '已跳过'
                 lines.append(f"- ID{row['id']} | {row['group_name']} | {row['text']} | {status}")
         else:
             lines.append("")
             lines.append("【其他待办】")
             lines.append("- 无")
+
+        skipped_total = len(skipped_periodic_rows) + len(skipped_simple_rows)
+        if skipped_total:
+            lines.append("")
+            lines.append(f"【已跳过】共 {skipped_total} 项（默认不混入活跃待办）")
+            for row in skipped_periodic_rows:
+                lines.append(f"- FIN-{row['id']} | {row['name']} ({row['cycle_type']}) | 已跳过")
+            for row in skipped_simple_rows:
+                lines.append(f"- ID{row['id']} | {row['group_name']} | {row['text']} | 已跳过")
 
         return "\n".join(lines)
 

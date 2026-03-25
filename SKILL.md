@@ -60,8 +60,11 @@ description: 通用周期任务管理器 - 支持6种周期类型、每月N次�
 ## Usage
 
 ```bash
-# 列出所有待办（自动确保今天 occurrence 已生成）
+# 列出活跃待办（自动确保今天 occurrence 已生成）
 python3 skills/chronos/scripts/todo.py list
+
+# 如需连 skipped 一起看，显式打开
+python3 skills/chronos/scripts/todo.py list --include-skipped
 
 # 添加周期任务（例如：每月2次，每周三10:00）
 python3 skills/chronos/scripts/todo.py add "周三抢券" \
@@ -117,5 +120,8 @@ python3 skills/chronos/scripts/todo.py show FIN-123
 ```bash
 python3 -m unittest discover -s skills/chronos/tests -v
 python3 skills/chronos/scripts/schema_preflight.py
+python3 skills/chronos/scripts/test_config.py
+```
+y
 python3 skills/chronos/scripts/test_config.py
 ```

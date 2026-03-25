@@ -290,39 +290,49 @@ def parse_natural_language(text: str) -> dict:
     return {'cmd': 'unknown', 'text': text}
 
 
-def get_periodic_pending():
+def get_periodic_pending(include_skipped: bool = False):
     conn = sqlite3.connect(str(TODO_DB))
     cur = conn.cursor()
+    allowed_statuses = ['pending', 'reminded']
+    if include_skipped:
+        allowed_statuses.append('skipped')
+    placeholders = ', '.join('?' for _ in allowed_statuses)
     cur.execute(
-        """
+        f"""
         SELECT t.id as task_id, t.name, t.category, t.cycle_type,
                o.id as occ_id, o.date, o.status
         FROM periodic_occurrences o
         JOIN periodic_tasks t ON o.task_id = t.id
-        WHERE o.status IN ('pending', 'reminded', 'skipped')
+        WHERE o.status IN ({placeholders})
         ORDER BY o.date, t.name
-        """
+        """,
+        allowed_statuses,
     )
     rows = cur.fetchall()
     conn.close()
     return rows
 
 
-def get_simple_pending():
+def get_simple_pending(include_skipped: bool = False):
     conn = sqlite3.connect(str(TODO_DB))
     cur = conn.cursor()
+    allowed_statuses = ['pending', 'in_progress']
+    if include_skipped:
+        allowed_statuses.append('skipped')
+    placeholders = ', '.join('?' for _ in allowed_statuses)
     cur.execute(
-        """
+        f"""
         SELECT e.id, e.text, e.status, g.name as group_name
         FROM entries e
         LEFT JOIN groups g ON e.group_id = g.id
-        WHERE e.status IN ('pending', 'in_progress', 'skipped')
+        WHERE e.status IN ({placeholders})
           AND NOT EXISTS (
               SELECT 1 FROM periodic_tasks t
               WHERE t.legacy_entry_id = e.id
           )
         ORDER BY e.id
-        """
+        """,
+        allowed_statuses,
     )
     rows = cur.fetchall()
     conn.close()
@@ -629,11 +639,11 @@ def complete_overdue_tasks(now: datetime | None = None, dry_run: bool = False) -
     }
 
 
-def cmd_list():
+def cmd_list(include_skipped: bool = False):
     ensure_today_occurrences()
 
-    periodic = get_periodic_pending()
-    simple = get_simple_pending()
+    periodic = get_periodic_pending(include_skipped=include_skipped)
+    simple = get_simple_pending(include_skipped=include_skipped)
 
     print("=== Chronos Todo List ===\n")
 
@@ -652,8 +662,14 @@ def cmd_list():
             print(f"  [ID{entry_id}] {group} | {text} | {display_status}")
         print()
 
+    if include_skipped:
+        print("（已包含 skipped 项）")
+
     if not periodic and not simple:
-        print("✅ 没有待办任务。")
+        if include_skipped:
+            print("✅ 没有待办或已跳过任务。")
+        else:
+            print("✅ 没有待办任务。")
 
 
 def cmd_add(text, category='Inbox', cycle_type='once', **kwargs):
@@ -891,7 +907,7 @@ def main():
         args = parser.parse_args()
 
         if args.command == 'list':
-            cmd_list()
+            cmd_list(include_skipped=args.include_skipped)
         elif args.command == 'add':
             try:
                 validate_add_args(args)

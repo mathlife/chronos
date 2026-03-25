@@ -1,7 +1,9 @@
 import importlib.util
+import io
 import sqlite3
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -38,6 +40,108 @@ class TodoHelpersTests(unittest.TestCase):
     def test_natural_language_parser_detects_complete_overdue(self):
         parsed = todo_module.parse_natural_language("自动完成逾期待办")
         self.assertEqual(parsed["cmd"], "complete-overdue")
+
+
+class TodoListVisibilityTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.db_path = Path(self.temp_dir.name) / "todo.db"
+        self._init_db()
+
+    def _init_db(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE groups (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL
+            );
+            CREATE TABLE entries (
+                id INTEGER PRIMARY KEY,
+                text TEXT NOT NULL,
+                status TEXT NOT NULL,
+                group_id INTEGER NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE periodic_tasks (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                category TEXT,
+                cycle_type TEXT NOT NULL,
+                time_of_day TEXT,
+                count_current_month INTEGER DEFAULT 0,
+                legacy_entry_id INTEGER
+            );
+            CREATE TABLE periodic_occurrences (
+                id INTEGER PRIMARY KEY,
+                task_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                status TEXT NOT NULL,
+                reminder_job_id TEXT,
+                completed_at TEXT,
+                is_auto_completed INTEGER DEFAULT 0,
+                completion_mode TEXT,
+                special_handler_result TEXT,
+                scheduled_time TEXT,
+                scheduled_at TEXT,
+                legacy_entry_id INTEGER
+            );
+            """
+        )
+        conn.execute("INSERT INTO groups (id, name) VALUES (1, 'Inbox')")
+        conn.execute("INSERT INTO periodic_tasks (id, name, category, cycle_type, time_of_day) VALUES (1, '活跃周期任务', 'Inbox', 'daily', '09:00')")
+        conn.execute("INSERT INTO periodic_tasks (id, name, category, cycle_type, time_of_day) VALUES (2, '已跳过周期任务', 'Inbox', 'daily', '10:00')")
+        conn.execute("INSERT INTO periodic_occurrences (id, task_id, date, status) VALUES (101, 1, '2026-03-25', 'pending')")
+        conn.execute("INSERT INTO periodic_occurrences (id, task_id, date, status) VALUES (102, 2, '2026-03-25', 'skipped')")
+        conn.execute("INSERT INTO entries (id, text, status, group_id) VALUES (11, '活跃普通任务', 'pending', 1)")
+        conn.execute("INSERT INTO entries (id, text, status, group_id) VALUES (12, '已跳过普通任务', 'skipped', 1)")
+        conn.commit()
+        conn.close()
+
+    def test_pending_queries_hide_skipped_by_default(self):
+        with patch.object(todo_module, 'TODO_DB', self.db_path):
+            periodic = todo_module.get_periodic_pending()
+            simple = todo_module.get_simple_pending()
+
+        self.assertEqual([row[4] for row in periodic], [101])
+        self.assertEqual([row[0] for row in simple], [11])
+
+    def test_pending_queries_can_include_skipped(self):
+        with patch.object(todo_module, 'TODO_DB', self.db_path):
+            periodic = todo_module.get_periodic_pending(include_skipped=True)
+            simple = todo_module.get_simple_pending(include_skipped=True)
+
+        self.assertEqual(sorted(row[4] for row in periodic), [101, 102])
+        self.assertEqual(sorted(row[0] for row in simple), [11, 12])
+
+    def test_cmd_list_hides_skipped_by_default(self):
+        with patch.object(todo_module, 'TODO_DB', self.db_path), \
+             patch.object(todo_module, 'ensure_today_occurrences'):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                todo_module.cmd_list()
+
+        output = buf.getvalue()
+        self.assertIn('FIN-101', output)
+        self.assertIn('ID11', output)
+        self.assertNotIn('FIN-102', output)
+        self.assertNotIn('ID12', output)
+        self.assertNotIn('已包含 skipped 项', output)
+
+    def test_cmd_list_include_skipped_shows_marker_and_rows(self):
+        with patch.object(todo_module, 'TODO_DB', self.db_path), \
+             patch.object(todo_module, 'ensure_today_occurrences'):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                todo_module.cmd_list(include_skipped=True)
+
+        output = buf.getvalue()
+        self.assertIn('FIN-102', output)
+        self.assertIn('ID12', output)
+        self.assertIn('已包含 skipped 项', output)
+        self.assertIn('已跳过', output)
 
 
 class TodoOverdueCompletionTests(unittest.TestCase):
