@@ -145,6 +145,18 @@ class TodoSnapshotVisibilityTests(unittest.TestCase):
             "INSERT INTO entries (id, text, status, group_id) VALUES (?, ?, ?, ?)",
             (12, "已跳过普通任务", "skipped", 1),
         )
+        self.conn.execute(
+            "INSERT INTO entries (id, text, status, group_id) VALUES (?, ?, ?, ?)",
+            (13, "已迁移旧周期任务", "pending", 1),
+        )
+        self.conn.execute(
+            "INSERT INTO periodic_tasks (id, name, category, cycle_type, time_of_day, event_time, timezone, legacy_entry_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            (3, "已迁移旧周期任务", "Inbox", "daily", "11:00", "11:00", "Asia/Shanghai", 13),
+        )
+        self.conn.execute(
+            "INSERT INTO periodic_occurrences (id, task_id, date, status, legacy_entry_id) VALUES (?, ?, ?, ?, ?)",
+            (103, 3, "2026-03-25", "pending", 13),
+        )
         self.conn.commit()
 
     def tearDown(self):
@@ -158,13 +170,16 @@ class TodoSnapshotVisibilityTests(unittest.TestCase):
 
         active_section = snapshot.split("【已跳过】", 1)[0]
         self.assertIn("FIN-101", active_section)
+        self.assertIn("FIN-103", active_section)
         self.assertIn("ID11", active_section)
         self.assertNotIn("FIN-102", active_section)
         self.assertNotIn("ID12", active_section)
+        self.assertNotIn("ID13", active_section)
 
         self.assertIn("【已跳过】共 2 项（默认不混入活跃待办）", snapshot)
         self.assertIn("FIN-102", snapshot)
         self.assertIn("ID12", snapshot)
+        self.assertNotIn("ID13", snapshot)
 
 
 if __name__ == "__main__":

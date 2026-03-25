@@ -471,6 +471,10 @@ class PeriodicTaskManager:
             FROM entries e
             LEFT JOIN groups g ON e.group_id = g.id
             WHERE e.status IN ('pending', 'in_progress')
+              AND NOT EXISTS (
+                  SELECT 1 FROM periodic_tasks t
+                  WHERE t.legacy_entry_id = e.id
+              )
             ORDER BY e.id
             """
         ).fetchall()
@@ -480,6 +484,10 @@ class PeriodicTaskManager:
             FROM entries e
             LEFT JOIN groups g ON e.group_id = g.id
             WHERE e.status = 'skipped'
+              AND NOT EXISTS (
+                  SELECT 1 FROM periodic_tasks t
+                  WHERE t.legacy_entry_id = e.id
+              )
             ORDER BY e.id
             """
         ).fetchall()
