@@ -306,13 +306,17 @@ class TodoOverdueCompletionTests(unittest.TestCase):
         self.assertIn('关联周期任务：2', show_output)
 
     def test_complete_overdue_tasks_runs_special_handler_from_periodic_metadata(self):
-        list_sessions = json.dumps(['agent:main:subagent:abc', 'main'])
+        pending_subagents = json.dumps([
+            {'session_id': 'agent:main:subagent:abc', 'status': 'completed', 'handled_at': None}
+        ])
 
         def fake_run(args, capture_output=True, text=True, timeout=None):
-            if 'list-sessions' in args:
-                return type('Result', (), {'returncode': 0, 'stdout': list_sessions, 'stderr': ''})()
+            if 'pending-subagents' in args:
+                return type('Result', (), {'returncode': 0, 'stdout': pending_subagents, 'stderr': ''})()
             if 'sync' in args:
                 return type('Result', (), {'returncode': 0, 'stdout': 'Synced 2 memories from agent:main:subagent:abc\n', 'stderr': ''})()
+            if 'mark-subagent-synced' in args:
+                return type('Result', (), {'returncode': 0, 'stdout': '{"session_id": "agent:main:subagent:abc", "status": "synced"}', 'stderr': ''})()
             return type('Result', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
 
         memory_manager_script = self.workspace / 'scripts' / 'memory_manager.py'
@@ -357,6 +361,31 @@ class TodoOverdueCompletionTests(unittest.TestCase):
         memory_log = (self.workspace / 'memory' / '2026-03-25.md').read_text(encoding='utf-8')
         self.assertIn('Meta-Review fallback completed via direct PREDICTIONS.md/FRICTION.md inspection', memory_log)
         self.assertEqual(memory_log.count('Subagent memory sync completed'), 1)
+
+    def test_run_sync_subagent_memory_marks_failure_in_ledger(self):
+        pending_subagents = json.dumps([
+            {'session_id': 'agent:main:subagent:abc', 'status': 'completed', 'handled_at': None}
+        ])
+
+        def fake_run(args, capture_output=True, text=True, timeout=None):
+            if 'pending-subagents' in args:
+                return type('Result', (), {'returncode': 0, 'stdout': pending_subagents, 'stderr': ''})()
+            if 'sync' in args:
+                return type('Result', (), {'returncode': 1, 'stdout': '', 'stderr': 'boom'})()
+            if 'mark-subagent-failed' in args:
+                return type('Result', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
+            raise AssertionError(f'unexpected args: {args}')
+
+        memory_manager_script = self.workspace / 'scripts' / 'memory_manager.py'
+        memory_manager_script.write_text('# stub', encoding='utf-8')
+
+        with patch.object(todo_module, 'WORKSPACE', self.workspace), \
+             patch.object(todo_module, 'subprocess') as mock_subprocess:
+            mock_subprocess.run.side_effect = fake_run
+            ok, message = todo_module.run_sync_subagent_memory(None, now=datetime(2026, 3, 25, 11, 30))
+
+        self.assertFalse(ok)
+        self.assertIn('同步 agent:main:subagent:abc 失败', message)
 
     def test_complete_overdue_tasks_dry_run_does_not_change_state(self):
         memory_manager_script = self.workspace / 'scripts' / 'memory_manager.py'

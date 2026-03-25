@@ -525,24 +525,42 @@ def run_sync_subagent_memory(handler_payload: str | None, now: datetime | None =
         filter_keyword = payload.get('session_filter', filter_keyword)
 
     try:
-        result = subprocess.run([PYTHON_BIN, str(memory_manager), 'list-sessions'], capture_output=True, text=True, timeout=15)
+        result = subprocess.run([PYTHON_BIN, str(memory_manager), 'pending-subagents'], capture_output=True, text=True, timeout=15)
         if result.returncode != 0:
-            return False, f"❌ 列出 session 失败: {result.stderr or result.stdout}"
-        sessions = json.loads(result.stdout or '[]')
+            return False, f"❌ 读取 subagent ledger 失败: {result.stderr or result.stdout}"
+        pending_entries = json.loads(result.stdout or '[]')
     except Exception as exc:
-        return False, f"❌ 读取 session 列表失败: {exc}"
+        return False, f"❌ 读取 subagent ledger 失败: {exc}"
 
-    for session_id in sessions:
-        if not isinstance(session_id, str):
+    for entry in pending_entries:
+        if not isinstance(entry, dict):
+            continue
+        session_id = entry.get('session_id')
+        if not isinstance(session_id, str) or not session_id:
             continue
         if filter_keyword and filter_keyword not in session_id:
             continue
         sync_targets.append(session_id)
         sync_result = subprocess.run([PYTHON_BIN, str(memory_manager), 'sync', session_id], capture_output=True, text=True, timeout=20)
         if sync_result.returncode != 0:
+            subprocess.run(
+                [PYTHON_BIN, str(memory_manager), 'mark-subagent-failed', session_id, (sync_result.stderr or sync_result.stdout or '').strip()[:500]],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
             return False, f"❌ 同步 {session_id} 失败: {sync_result.stderr or sync_result.stdout}"
         match = re.search(r'Synced\s+(\d+)\s+memories', sync_result.stdout)
-        synced_counts[session_id] = int(match.group(1)) if match else 0
+        synced_count = int(match.group(1)) if match else 0
+        synced_counts[session_id] = synced_count
+        mark_result = subprocess.run(
+            [PYTHON_BIN, str(memory_manager), 'mark-subagent-synced', session_id, str(synced_count)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if mark_result.returncode != 0:
+            return False, f"❌ 标记 {session_id} 已同步失败: {mark_result.stderr or mark_result.stdout}"
 
     total_synced = sum(synced_counts.values())
     note = f"- {now.strftime('%H:%M')} Subagent memory sync completed. sessions={len(sync_targets)} total_memories={total_synced} details={json.dumps(synced_counts, ensure_ascii=False)}"

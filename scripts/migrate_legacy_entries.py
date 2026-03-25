@@ -159,9 +159,9 @@ def build_every_n_hours_task(entry: sqlite3.Row, interval_hours: int, anchor_tim
         except ValueError:
             start_date = None
     payload = {
-        'command': 'memory_manager.py sync <subagent_session_id>',
+        'command': 'memory_manager.py pending-subagents -> sync -> mark-subagent-synced',
         'session_filter': ':subagent:',
-        'note': 'Migrated from legacy every-N-hours entry; sync all recorded subagent sessions into main memory.',
+        'note': 'Migrated from legacy every-N-hours entry; sync pending recorded subagent sessions into main memory via ledger.',
     }
     return {
         'name': '同步 subagent 记忆',
