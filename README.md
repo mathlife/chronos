@@ -58,7 +58,7 @@ Expansion rule for each active day:
 
 This is conservative and matches the legacy `每 4 小时：同步 subagent 记忆` expectation without introducing cross-day offset state.
 
-`sync_subagent_memory` now reads a file-backed ledger at `memory/subagent_sync_ledger.json` via `memory_manager.py pending-subagents`, so the hourly handler no longer guesses session ids from all memory. Completed subagent sessions can be recorded with `memory_manager.py record-subagent <session_id>`, successful syncs are marked handled with `mark-subagent-synced`, and failures remain pending with an updated error trail.
+`sync_subagent_memory` now reads a file-backed ledger at `memory/subagent_sync_ledger.json` via `memory_manager.py pending-subagents`, so the hourly handler no longer guesses session ids from all memory. OpenClaw now auto-records completed subagent sessions into that ledger on the subagent completion path; `memory_manager.py record-subagent <session_id>` remains available only for manual backfill. Successful syncs are marked handled with `mark-subagent-synced`, and failures remain pending with an updated error trail.
 
 When `complete-overdue` processes multiple overdue hourly occurrences for the same task on the same day and that task has a `special_handler`, Chronos now runs the handler once for that task/day batch, then marks every overdue occurrence completed with `completion_mode=fallback_handler_merged` and a per-occurrence `special_handler_result` trail (`merge_key`, merged index/count, source occurrence).
 

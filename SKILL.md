@@ -46,7 +46,7 @@ description: 通用周期任务管理器 - 支持6种周期类型、每月N次�
 ### 显式 system handler
 - `special_handler` 元数据挂在 `periodic_tasks` 上，不再只能靠 `entries.text` 正则猜测
 - 当前已支持：`meta_review_fallback`、`sync_subagent_memory`
-- `sync_subagent_memory` 从 `memory/subagent_sync_ledger.json` 读取待同步 subagent session；记录命令为 `memory_manager.py record-subagent <session_id>`，成功后标记 handled
+- `sync_subagent_memory` 从 `memory/subagent_sync_ledger.json` 读取待同步 subagent session；现在应由 OpenClaw 在 subagent 完成路径自动写入 ledger，`memory_manager.py record-subagent <session_id>` 仅保留给补录/回填场景，成功后标记 handled
 - overdue completion 会把 handler 结果写回 occurrence：`completion_mode` / `special_handler_result`
 - 对同一天同一 hourly 任务的多个 overdue occurrence，如存在 `special_handler`，`complete-overdue` 只执行一次 handler，再把所有相关 occurrence 标记为 `fallback_handler_merged`，并写入 merged trace（merge_key / merged occurrence index/count）
 
