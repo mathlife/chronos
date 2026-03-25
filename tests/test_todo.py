@@ -19,6 +19,13 @@ spec.loader.exec_module(todo_module)
 
 
 class TodoHelpersTests(unittest.TestCase):
+    def test_build_parser_list_supports_include_skipped_flag(self):
+        parser = todo_module.build_parser()
+        args = parser.parse_args(["list", "--include-skipped"])
+
+        self.assertEqual(args.command, "list")
+        self.assertTrue(args.include_skipped)
+
     def test_parse_entry_identifier_accepts_prefixed_ids(self):
         self.assertEqual(todo_module.parse_entry_identifier("ID45"), 45)
         self.assertEqual(todo_module.parse_entry_identifier("45"), 45)

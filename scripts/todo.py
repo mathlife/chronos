@@ -94,7 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Chronos unified todo", add_help=True)
     subparsers = parser.add_subparsers(dest="command")
 
-    subparsers.add_parser("list", help="List all pending tasks")
+    list_parser = subparsers.add_parser("list", help="List all pending tasks")
+    list_parser.add_argument("--include-skipped", action="store_true", help="Include skipped tasks in the list view")
 
     add_parser = subparsers.add_parser("add", help="Add a task")
     add_parser.add_argument("name", help="Task name")
