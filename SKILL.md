@@ -15,6 +15,7 @@ description: 通用周期任务管理器 - 支持6种周期类型、每月N次�
 ### 周期类型
 - `once`：一次性（有明确 `--start-date` 时走 canonical task/occurrence）
 - `daily`：每天
+- `hourly`：每 N 小时（`--interval-hours` + `--time` 作为锚点）
 - `weekly`：每周（指定星期几）
 - `monthly_fixed`：每月固定日期（如15号）
 - `monthly_range`：每月区间（如11号→5号，跨月）
@@ -31,6 +32,7 @@ description: 通用周期任务管理器 - 支持6种周期类型、每月N次�
 - 每日自动清理过期 cron
 - 提醒投递必须显式指定目标 chat
 - 若时间已过，会走补发提醒分支
+- `hourly` 任务会在当天展开为多个 occurrence，按 `scheduled_time` 各自提醒/补完成
 
 ### 统一视图
 - `todo.py list`：合并显示周期任务和普通任务
@@ -42,7 +44,7 @@ description: 通用周期任务管理器 - 支持6种周期类型、每月N次�
 
 ### 显式 system handler
 - `special_handler` 元数据挂在 `periodic_tasks` 上，不再只能靠 `entries.text` 正则猜测
-- 当前已支持：`meta_review_fallback`
+- 当前已支持：`meta_review_fallback`、`sync_subagent_memory`
 - overdue completion 会把 handler 结果写回 occurrence：`completion_mode` / `special_handler_result`
 
 ## Configuration
@@ -72,6 +74,14 @@ python3 skills/chronos/scripts/todo.py add "周三抢券" \
   --weekday 2 \
   --n-per-month 2 \
   --time 10:00
+
+# 添加每4小时任务（08:00 作为锚点；当天展开为 00/04/08/12/16/20）
+python3 skills/chronos/scripts/todo.py add "同步 subagent 记忆" \
+  --cycle-type hourly \
+  --interval-hours 4 \
+  --time 08:00 \
+  --task-kind system \
+  --special-handler sync_subagent_memory
 
 # 添加一次性计划任务（Phase 1 起：有 start-date 就进入 canonical task）
 python3 skills/chronos/scripts/todo.py add "周五 10 点抢券" \
@@ -110,6 +120,7 @@ python3 skills/chronos/scripts/todo.py skip 45         # 普通任务
 # 自然语言支持
 python3 skills/chronos/scripts/todo.py "跳过 FIN-123"
 python3 skills/chronos/scripts/todo.py "查询待办"
+python3 skills/chronos/scripts/todo.py "添加任务 每4小时 08:00 同步subagent记忆"
 
 # 查看详情
 python3 skills/chronos/scripts/todo.py show FIN-123
@@ -120,8 +131,5 @@ python3 skills/chronos/scripts/todo.py show FIN-123
 ```bash
 python3 -m unittest discover -s skills/chronos/tests -v
 python3 skills/chronos/scripts/schema_preflight.py
-python3 skills/chronos/scripts/test_config.py
-```
-y
 python3 skills/chronos/scripts/test_config.py
 ```

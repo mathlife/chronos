@@ -24,6 +24,7 @@ MANAGER_SCRIPT = SCRIPTS_DIR / 'periodic_task_manager.py'
 CYCLE_TYPES = list(ALLOWED_CYCLE_TYPES)
 TIME_PATTERN = re.compile(r'(?<!\d)(\d{1,2}):(\d{2})(?!\d)')
 META_REVIEW_PATTERN = re.compile(r'meta[- ]?review|meta_auditor\.py', re.IGNORECASE)
+EVERY_N_HOURS_PATTERN = re.compile(r'每\s*(\d+)\s*小时')
 RECURRING_ENTRY_PATTERNS = [
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
@@ -63,6 +64,8 @@ def validate_add_args(args: argparse.Namespace) -> None:
         raise ValueError("range-end must be 1-31")
     if args.n_per_month is not None and args.n_per_month <= 0:
         raise ValueError("n-per-month must be > 0")
+    if args.interval_hours is not None and (args.interval_hours <= 0 or args.interval_hours > 24):
+        raise ValueError("interval-hours must be 1-24")
     if args.end_date:
         try:
             date.fromisoformat(args.end_date)
@@ -78,6 +81,8 @@ def validate_add_args(args: argparse.Namespace) -> None:
         return
     if args.cycle_type == 'once' and not args.start_date:
         raise ValueError("scheduled once tasks require --start-date YYYY-MM-DD")
+    if args.cycle_type == 'hourly' and args.interval_hours is None:
+        args.interval_hours = 1
     if args.cycle_type == 'weekly' and args.weekday is None:
         raise ValueError("weekly tasks require --weekday")
     if args.cycle_type == 'monthly_fixed' and args.day_of_month is None:
@@ -107,6 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.add_argument("--range-start", type=int)
     add_parser.add_argument("--range-end", type=int)
     add_parser.add_argument("--n-per-month", type=int)
+    add_parser.add_argument("--interval-hours", type=int)
     add_parser.add_argument("--dates-list")
     add_parser.add_argument("--start-date")
     add_parser.add_argument("--end-date")
@@ -224,7 +230,7 @@ def parse_natural_language(text: str) -> dict:
                     if before_part:
                         name = before_part
             else:
-                keywords = ['每周', '每天', '每日', '每月']
+                keywords = ['每周', '每天', '每日', '每月', '每小时']
                 first_kw_pos = len(after_add)
                 for kw in keywords:
                     pos = after_add.find(kw)
@@ -241,7 +247,11 @@ def parse_natural_language(text: str) -> dict:
 
         params = {'name': name}
 
-        if '每月' in text and ('次' in text or '最多' in text):
+        every_hours = re.search(r'每\s*(\d+)\s*小时', text)
+        if every_hours:
+            params['cycle_type'] = 'hourly'
+            params['interval_hours'] = int(every_hours.group(1))
+        elif '每月' in text and ('次' in text or '最多' in text):
             params['cycle_type'] = 'monthly_n_times'
             n_match = re.search(r'每月最多?(\d+)次', text)
             if n_match:
@@ -278,7 +288,7 @@ def parse_natural_language(text: str) -> dict:
             time_match = re.search(r'(\d{1,2})点', text)
         if time_match:
             hour = int(time_match.group(1))
-            minute = int(time_match.group(2)) if time_match.lastindex >= 2 else 0
+            minute = int(time_match.group(2)) if time_match.lastindex and time_match.lastindex >= 2 else 0
             params['time_of_day'] = f"{hour:02d}:{minute:02d}"
         else:
             params['time_of_day'] = '09:00'
@@ -301,11 +311,11 @@ def get_periodic_pending(include_skipped: bool = False):
     cur.execute(
         f"""
         SELECT t.id as task_id, t.name, t.category, t.cycle_type,
-               o.id as occ_id, o.date, o.status
+               o.id as occ_id, o.date, o.status, o.scheduled_time
         FROM periodic_occurrences o
         JOIN periodic_tasks t ON o.task_id = t.id
         WHERE o.status IN ({placeholders})
-        ORDER BY o.date, t.name
+        ORDER BY o.date, COALESCE(o.scheduled_time, t.time_of_day), t.name
         """,
         allowed_statuses,
     )
@@ -375,15 +385,15 @@ def get_overdue_periodic_tasks(now: datetime | None = None) -> list[dict]:
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT o.id, t.id, t.name, t.time_of_day, o.status, t.special_handler, t.handler_payload
+        SELECT o.id, t.id, t.name, COALESCE(o.scheduled_time, t.time_of_day), o.status, t.special_handler, t.handler_payload
         FROM periodic_occurrences o
         JOIN periodic_tasks t ON o.task_id = t.id
         WHERE o.date = ?
           AND o.status IN ('pending', 'reminded')
-          AND t.time_of_day IS NOT NULL
-          AND t.time_of_day != ''
-          AND t.time_of_day <= ?
-        ORDER BY t.time_of_day, t.name
+          AND COALESCE(o.scheduled_time, t.time_of_day) IS NOT NULL
+          AND COALESCE(o.scheduled_time, t.time_of_day) != ''
+          AND COALESCE(o.scheduled_time, t.time_of_day) <= ?
+        ORDER BY COALESCE(o.scheduled_time, t.time_of_day), t.name, o.id
         """,
         (today, current_time),
     )
@@ -393,12 +403,12 @@ def get_overdue_periodic_tasks(now: datetime | None = None) -> list[dict]:
             'occurrence_id': occ_id,
             'task_id': task_id,
             'name': name,
-            'time_of_day': time_of_day,
+            'time_of_day': scheduled_time,
             'status': status,
             'special_handler': special_handler,
             'handler_payload': handler_payload,
         }
-        for occ_id, task_id, name, time_of_day, status, special_handler, handler_payload in cur.fetchall()
+        for occ_id, task_id, name, scheduled_time, status, special_handler, handler_payload in cur.fetchall()
     ]
     conn.close()
     return rows
@@ -494,11 +504,56 @@ def run_meta_review_fallback(task_text: str, now: datetime | None = None) -> tup
     return True, note
 
 
+def run_sync_subagent_memory(handler_payload: str | None, now: datetime | None = None) -> tuple[bool, str]:
+    now = now or datetime.now()
+    memory_manager = WORKSPACE / 'scripts' / 'memory_manager.py'
+    if not memory_manager.exists():
+        return False, f"❌ memory_manager.py 不存在: {memory_manager}"
+
+    filter_keyword = ':subagent:'
+    sync_targets: list[str] = []
+    synced_counts: dict[str, int] = {}
+    payload = {}
+    if handler_payload:
+        try:
+            payload = json.loads(handler_payload)
+        except json.JSONDecodeError:
+            payload = {}
+        filter_keyword = payload.get('session_filter', filter_keyword)
+
+    try:
+        result = subprocess.run([PYTHON_BIN, str(memory_manager), 'list-sessions'], capture_output=True, text=True, timeout=15)
+        if result.returncode != 0:
+            return False, f"❌ 列出 session 失败: {result.stderr or result.stdout}"
+        sessions = json.loads(result.stdout or '[]')
+    except Exception as exc:
+        return False, f"❌ 读取 session 列表失败: {exc}"
+
+    for session_id in sessions:
+        if not isinstance(session_id, str):
+            continue
+        if filter_keyword and filter_keyword not in session_id:
+            continue
+        sync_targets.append(session_id)
+        sync_result = subprocess.run([PYTHON_BIN, str(memory_manager), 'sync', session_id], capture_output=True, text=True, timeout=20)
+        if sync_result.returncode != 0:
+            return False, f"❌ 同步 {session_id} 失败: {sync_result.stderr or sync_result.stdout}"
+        match = re.search(r'Synced\s+(\d+)\s+memories', sync_result.stdout)
+        synced_counts[session_id] = int(match.group(1)) if match else 0
+
+    total_synced = sum(synced_counts.values())
+    note = f"- {now.strftime('%H:%M')} Subagent memory sync completed. sessions={len(sync_targets)} total_memories={total_synced} details={json.dumps(synced_counts, ensure_ascii=False)}"
+    append_memory_log(note, log_date=now.date())
+    return True, note
+
+
 def run_special_handler(handler_name: str | None, handler_payload: str | None, task_text: str, now: datetime | None = None) -> tuple[bool, str]:
     if not handler_name:
         return True, ''
     if handler_name == 'meta_review_fallback':
         return run_meta_review_fallback(task_text, now=now)
+    if handler_name == 'sync_subagent_memory':
+        return run_sync_subagent_memory(handler_payload, now=now)
     return False, f"❌ 不支持的 special_handler: {handler_name}"
 
 
@@ -536,7 +591,6 @@ def complete_periodic_occurrence(occ_id: int, *, completion_mode: str = 'manual'
     finally:
         conn.close()
 
-    subprocess.run([PYTHON_BIN, str(MANAGER_SCRIPT), '--complete-activity', str(task_id)], capture_output=True, text=True)
     return True, f"✅ 已完成 FIN-{occ_id}（任务ID {task_id}）"
 
 
@@ -650,9 +704,10 @@ def cmd_list(include_skipped: bool = False):
 
     if periodic:
         print("【周期任务】")
-        for task_id, name, category, cycle_type, occ_id, date_str, status in periodic:
+        for task_id, name, category, cycle_type, occ_id, date_str, status, scheduled_time in periodic:
             display_status = "已跳过" if status == 'skipped' else status
-            print(f"  [FIN-{occ_id}] {date_str} | {name} ({cycle_type}) | {display_status}")
+            time_suffix = f" @ {scheduled_time}" if scheduled_time else ''
+            print(f"  [FIN-{occ_id}] {date_str}{time_suffix} | {name} ({cycle_type}) | {display_status}")
         print()
 
     if simple:
@@ -693,6 +748,8 @@ def cmd_add(text, category='Inbox', cycle_type='once', **kwargs):
             args.extend(['--range-start', str(kwargs['range_start']), '--range-end', str(kwargs['range_end'])])
         if 'n_per_month' in kwargs:
             args.extend(['--n-per-month', str(kwargs['n_per_month'])])
+        if 'interval_hours' in kwargs:
+            args.extend(['--interval-hours', str(kwargs['interval_hours'])])
         if 'dates_list' in kwargs:
             args.extend(['--dates-list', str(kwargs['dates_list'])])
         if 'start_date' in kwargs:
@@ -782,10 +839,9 @@ def cmd_skip(identifier):
                 print(f"❌ 未找到 FIN-{occ_id}")
                 conn.close()
                 return
-            task_id, date_str = row
 
-            cur.execute("SELECT status FROM periodic_occurrences WHERE id = ?", (occ_id,))
-            current_status = cur.fetchone()[0]
+            cur.execute("SELECT status, reminder_job_id FROM periodic_occurrences WHERE id = ?", (occ_id,))
+            current_status, job_name = cur.fetchone()
             if current_status == 'skipped':
                 print(f"⚠️  FIN-{occ_id} 已经是跳过状态")
                 conn.close()
@@ -793,8 +849,6 @@ def cmd_skip(identifier):
 
             cur.execute("UPDATE periodic_occurrences SET status = 'skipped' WHERE id = ?", (occ_id,))
 
-            cur.execute("SELECT reminder_job_id FROM periodic_occurrences WHERE id = ?", (occ_id,))
-            job_name = cur.fetchone()[0]
             if job_name:
                 try:
                     subprocess.run([OPENCLAW_BIN, "cron", "remove", job_name], capture_output=True, text=True, timeout=10)
@@ -841,7 +895,7 @@ def cmd_show(identifier):
         cur.execute(
             """
             SELECT t.name, t.cycle_type, t.special_handler, o.date, o.status,
-                   o.reminder_job_id, o.completion_mode, o.special_handler_result
+                   o.reminder_job_id, o.completion_mode, o.special_handler_result, o.scheduled_time
             FROM periodic_occurrences o
             JOIN periodic_tasks t ON o.task_id = t.id
             WHERE o.id = ?
@@ -851,10 +905,11 @@ def cmd_show(identifier):
         row = cur.fetchone()
         conn.close()
         if row:
-            name, cycle_type, special_handler, date_str, status, job_id, completion_mode, special_handler_result = row
+            name, cycle_type, special_handler, date_str, status, job_id, completion_mode, special_handler_result, scheduled_time = row
             print(f"【周期任务】{name}")
             print(f"周期类型：{cycle_type}")
             print(f"日期：{date_str}")
+            print(f"时间：{scheduled_time or '无'}")
             print(f"状态：{status}")
             print(f"special_handler：{special_handler or '无'}")
             print(f"completion_mode：{completion_mode or '无'}")
@@ -932,6 +987,8 @@ def main():
                 kwargs['range_end'] = args.range_end
             if args.n_per_month is not None:
                 kwargs['n_per_month'] = args.n_per_month
+            if args.interval_hours is not None:
+                kwargs['interval_hours'] = args.interval_hours
             if args.dates_list is not None:
                 kwargs['dates_list'] = args.dates_list
             if args.start_date is not None:
@@ -993,9 +1050,10 @@ def main():
             range_start = parsed.get('range_start')
             range_end = parsed.get('range_end')
             n_per_month = parsed.get('n_per_month')
+            interval_hours = parsed.get('interval_hours')
             end_date = parsed.get('end_date')
 
-            print(f"🔍 解析结果：名称={name}, 周期={cycle_type}, 时间={time_of_day}, 星期={weekday}, 日期={day_of_month}, 区间={range_start}-{range_end}, 次数={n_per_month}, 结束={end_date}")
+            print(f"🔍 解析结果：名称={name}, 周期={cycle_type}, 时间={time_of_day}, 星期={weekday}, 日期={day_of_month}, 区间={range_start}-{range_end}, 次数={n_per_month}, 间隔小时={interval_hours}, 结束={end_date}")
 
             kwargs = {
                 'category': category,
@@ -1012,6 +1070,8 @@ def main():
                 kwargs['range_end'] = range_end
             if n_per_month is not None:
                 kwargs['n_per_month'] = n_per_month
+            if interval_hours is not None:
+                kwargs['interval_hours'] = interval_hours
             if end_date is not None:
                 kwargs['end_date'] = end_date
 

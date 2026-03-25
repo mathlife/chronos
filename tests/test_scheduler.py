@@ -62,6 +62,31 @@ class TaskSchedulerTests(unittest.TestCase):
             [date(2026, 3, 1), date(2026, 3, 15), date(2026, 3, 31)],
         )
 
+    def test_hourly_defaults_to_every_hour_with_midnight_anchor(self):
+        task = make_task(cycle_type="hourly", interval_hours=1, time_of_day="00:00")
+        scheduler = TaskScheduler(task, date(2026, 3, 15))
+
+        self.assertTrue(scheduler.should_remind_today())
+        self.assertEqual(len(scheduler.get_hourly_schedule_for_day(date(2026, 3, 15))), 24)
+        self.assertEqual(scheduler.get_hourly_schedule_for_day(date(2026, 3, 15))[0], "00:00")
+        self.assertEqual(scheduler.get_hourly_schedule_for_day(date(2026, 3, 15))[-1], "23:00")
+
+    def test_hourly_every_four_hours_respects_anchor_time(self):
+        task = make_task(cycle_type="hourly", interval_hours=4, time_of_day="08:00")
+        scheduler = TaskScheduler(task, date(2026, 3, 15))
+
+        self.assertEqual(
+            scheduler.get_hourly_schedule_for_day(date(2026, 3, 15)),
+            ["00:00", "04:00", "08:00", "12:00", "16:00", "20:00"],
+        )
+
+    def test_hourly_invalid_interval_never_matches(self):
+        task = make_task(cycle_type="hourly", interval_hours=0, time_of_day="08:00")
+        scheduler = TaskScheduler(task, date(2026, 3, 15))
+
+        self.assertFalse(scheduler.should_remind_today())
+        self.assertEqual(scheduler.get_hourly_schedule_for_day(date(2026, 3, 15)), [])
+
 
 if __name__ == "__main__":
     unittest.main()

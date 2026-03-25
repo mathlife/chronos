@@ -36,6 +36,7 @@ def create_db(db_path: Path, *, include_unique: bool = True, statuses: list[str]
             name TEXT NOT NULL UNIQUE,
             category TEXT DEFAULT 'Inbox',
             cycle_type TEXT NOT NULL,
+            interval_hours INTEGER,
             task_kind TEXT DEFAULT 'scheduled',
             source TEXT DEFAULT 'chronos',
             special_handler TEXT,
@@ -70,7 +71,7 @@ def create_db(db_path: Path, *, include_unique: bool = True, statuses: list[str]
                 scheduled_time TEXT,
                 scheduled_at TEXT,
                 FOREIGN KEY (task_id) REFERENCES periodic_tasks(id) ON DELETE CASCADE,
-                UNIQUE(task_id, date)
+                UNIQUE(task_id, date, scheduled_time)
             )
         """
     else:
@@ -101,8 +102,12 @@ def create_db(db_path: Path, *, include_unique: bool = True, statuses: list[str]
             )
         """
     cur.execute(occurrences_sql)
+    task_columns = {row[1] for row in cur.execute("PRAGMA table_info(periodic_tasks)").fetchall()}
     for cycle_type in cycle_types:
-        cur.execute("INSERT INTO periodic_tasks (name, cycle_type) VALUES (?, ?)", (f'test-task-{cycle_type}', cycle_type))
+        if 'interval_hours' in task_columns:
+            cur.execute("INSERT INTO periodic_tasks (name, cycle_type, interval_hours) VALUES (?, ?, ?)", (f'test-task-{cycle_type}', cycle_type, 4 if cycle_type == 'hourly' else None))
+        else:
+            cur.execute("INSERT INTO periodic_tasks (name, cycle_type) VALUES (?, ?)", (f'test-task-{cycle_type}', cycle_type))
     for index, status in enumerate(statuses, start=1):
         cur.execute(
             "INSERT INTO periodic_occurrences (task_id, date, status) VALUES (1, ?, ?)",
@@ -153,6 +158,17 @@ class SchemaPreflightTests(unittest.TestCase):
 
             self.assertEqual(info["status"], "warn")
             self.assertEqual(info["checks"]["invalid_statuses"], [{"status": "bogus", "count": 1}])
+
+    def test_inspect_schema_accepts_hourly_cycle_type(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "todo.db"
+            create_db(db_path, cycle_types=["hourly"])
+            module = load_module(db_path)
+
+            info = module.inspect_schema()
+
+            self.assertEqual(info["status"], "ok")
+            self.assertEqual(info["checks"]["invalid_cycle_types"], [])
 
     def test_inspect_schema_warns_on_invalid_cycle_type(self):
         with tempfile.TemporaryDirectory() as tmpdir:

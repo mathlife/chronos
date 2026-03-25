@@ -49,6 +49,7 @@ class LegacyMigrationScriptTests(unittest.TestCase):
                 range_start INTEGER,
                 range_end INTEGER,
                 n_per_month INTEGER,
+                interval_hours INTEGER,
                 time_of_day TEXT NOT NULL,
                 event_time TEXT,
                 timezone TEXT DEFAULT 'Asia/Shanghai',
@@ -82,7 +83,7 @@ class LegacyMigrationScriptTests(unittest.TestCase):
                 scheduled_at TEXT,
                 legacy_entry_id INTEGER,
                 FOREIGN KEY (task_id) REFERENCES periodic_tasks(id) ON DELETE CASCADE,
-                UNIQUE(task_id, date)
+                UNIQUE(task_id, date, scheduled_time)
             );
             """
         )
@@ -115,10 +116,12 @@ class LegacyMigrationScriptTests(unittest.TestCase):
         self.assertEqual(by_id[21].task_id, 2)
         self.assertEqual(by_id[16].action, 'create_task')
         self.assertEqual(by_id[16].task_params['special_handler'], 'meta_review_fallback')
-        self.assertEqual(by_id[15].action, 'manual_review')
-        self.assertIn('every-N-hours cadence', by_id[15].reason)
+        self.assertEqual(by_id[15].action, 'create_task')
+        self.assertEqual(by_id[15].task_params['cycle_type'], 'hourly')
+        self.assertEqual(by_id[15].task_params['interval_hours'], 4)
+        self.assertEqual(by_id[15].task_params['special_handler'], 'sync_subagent_memory')
 
-    def test_apply_links_existing_and_creates_meta_review_task(self):
+    def test_apply_links_existing_and_creates_meta_review_and_hourly_sync_tasks(self):
         conn = migrate_module.connect(str(self.db_path))
         try:
             plans = [migrate_module.classify_entry(conn, row) for row in migrate_module.load_entries(conn)]
@@ -133,10 +136,13 @@ class LegacyMigrationScriptTests(unittest.TestCase):
             meta_task = conn.execute(
                 "SELECT id, cycle_type, task_kind, source, legacy_entry_id, special_handler, start_date, time_of_day, handler_payload FROM periodic_tasks WHERE special_handler = 'meta_review_fallback'"
             ).fetchone()
-            occ = conn.execute(
-                "SELECT task_id, date, status, scheduled_time, legacy_entry_id FROM periodic_occurrences WHERE task_id = ?",
-                (meta_task[0],),
+            hourly_task = conn.execute(
+                "SELECT id, cycle_type, interval_hours, task_kind, source, legacy_entry_id, special_handler, time_of_day, handler_payload FROM periodic_tasks WHERE special_handler = 'sync_subagent_memory'"
             ).fetchone()
+            occs = conn.execute(
+                "SELECT task_id, date, status, scheduled_time, legacy_entry_id FROM periodic_occurrences WHERE task_id = ? ORDER BY scheduled_time",
+                (hourly_task[0],),
+            ).fetchall()
         finally:
             conn.close()
 
@@ -153,11 +159,24 @@ class LegacyMigrationScriptTests(unittest.TestCase):
         payload = json.loads(meta_task[8])
         self.assertEqual(payload['scope_days'], 1)
         self.assertEqual(payload['fallback_sources'], ['PREDICTIONS.md', 'FRICTION.md'])
-        self.assertIsNone(occ)
+
+        self.assertIsNotNone(hourly_task)
+        self.assertEqual(hourly_task[1], 'hourly')
+        self.assertEqual(hourly_task[2], 4)
+        self.assertEqual(hourly_task[3], 'system')
+        self.assertEqual(hourly_task[4], 'legacy_entries_migrated')
+        self.assertEqual(hourly_task[5], 15)
+        self.assertEqual(hourly_task[6], 'sync_subagent_memory')
+        self.assertEqual(hourly_task[7], '00:00')
+        hourly_payload = json.loads(hourly_task[8])
+        self.assertEqual(hourly_payload['session_filter'], ':subagent:')
+        self.assertEqual([row[3] for row in occs], ['00:00', '04:00', '08:00', '12:00', '16:00', '20:00'])
+        self.assertTrue(all(row[4] == 15 for row in occs))
 
         notes = [item.note for item in applied]
         self.assertTrue(any('linked entry 21 -> task 2' in note for note in notes))
         self.assertTrue(any('created task' in note and 'entry 16' in note for note in notes))
+        self.assertTrue(any('created task' in note and 'entry 15' in note for note in notes))
 
 
 if __name__ == '__main__':

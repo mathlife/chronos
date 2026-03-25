@@ -79,6 +79,9 @@ class TaskScheduler:
         if self.task.cycle_type == 'daily':
             return True
 
+        if self.task.cycle_type == 'hourly':
+            return self._get_hourly_schedule_for_day(today) != []
+
         if self.task.cycle_type == 'weekly':
             if self.task.weekday is None:
                 return False
@@ -105,6 +108,58 @@ class TaskScheduler:
             return today in self._get_monthly_dates(today.year, today.month)
 
         return False
+
+    def _parse_time_of_day(self) -> tuple[int, int] | None:
+        raw = (self.task.time_of_day or '').strip()
+        if not raw:
+            return None
+        try:
+            hour_str, minute_str = raw.split(':', 1)
+            hour = int(hour_str)
+            minute = int(minute_str)
+        except ValueError:
+            return None
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        return hour, minute
+
+    def _normalized_interval_hours(self) -> int | None:
+        value = self.task.interval_hours
+        if value is None:
+            value = 1
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return None
+        if value <= 0 or value > 24:
+            return None
+        return value
+
+    def _get_hourly_schedule_for_day(self, target_day: date) -> List[str]:
+        interval = self._normalized_interval_hours()
+        anchor = self._parse_time_of_day()
+        if interval is None or anchor is None:
+            return []
+
+        start_hour, start_minute = anchor
+        slots: List[str] = []
+        seen: set[str] = set()
+        for hour in range(start_hour, 24, interval):
+            label = f"{hour:02d}:{start_minute:02d}"
+            if label not in seen:
+                slots.append(label)
+                seen.add(label)
+        if interval != 24:
+            for hour in range(start_hour - interval, -1, -interval):
+                label = f"{hour:02d}:{start_minute:02d}"
+                if label not in seen:
+                    slots.append(label)
+                    seen.add(label)
+        slots.sort()
+        return slots
+
+    def get_hourly_schedule_for_day(self, target_day: date) -> List[str]:
+        return self._get_hourly_schedule_for_day(target_day)
 
     def _get_monthly_dates(self, year: int, month: int) -> List[date]:
         if not self.task.dates_list:
@@ -178,6 +233,10 @@ class TaskScheduler:
                 dates = []
 
         elif cycle_type == 'daily':
+            days_in_month = calendar.monthrange(year, month)[1]
+            dates = [date(year, month, d) for d in range(1, days_in_month + 1)]
+
+        elif cycle_type == 'hourly':
             days_in_month = calendar.monthrange(year, month)[1]
             dates = [date(year, month, d) for d in range(1, days_in_month + 1)]
 

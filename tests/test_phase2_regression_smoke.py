@@ -161,7 +161,10 @@ class Phase2RegressionSmokeTests(unittest.TestCase):
         by_id = {plan.entry_id: plan for plan in plans}
         self.assertEqual(by_id[2].action, "create_task")
         self.assertEqual(by_id[3].action, "create_task")
-        self.assertEqual(by_id[4].action, "manual_review")
+        self.assertEqual(by_id[4].action, "create_task")
+        self.assertEqual(by_id[4].task_params["cycle_type"], "hourly")
+        self.assertEqual(by_id[4].task_params["interval_hours"], 4)
+        self.assertEqual(by_id[4].task_params["special_handler"], "sync_subagent_memory")
         self.assertEqual(by_id[1].action, "skip_inbox")
 
         apply_conn = self.migrate_module.connect(str(apply_db))
@@ -185,14 +188,16 @@ class Phase2RegressionSmokeTests(unittest.TestCase):
         finally:
             apply_conn.close()
 
-        self.assertEqual(len(first_applied), 2)
+        self.assertEqual(len(first_applied), 3)
         self.assertTrue(any(row[0] == "迁移周任务" and row[1] == "legacy_entries_migrated" and row[2] == 2 for row in task_rows))
         self.assertTrue(any(row[0] == "Meta-Review fallback" and row[3] == "meta_review_fallback" and row[4] == "2026-03-01" for row in task_rows))
+        self.assertTrue(any(row[0] == "同步 subagent 记忆" and row[3] == "sync_subagent_memory" for row in task_rows))
         self.assertTrue(any(row[3] == 2 for row in occ_rows), "migrated pending recurring entry should seed today's occurrence")
+        self.assertTrue(any(row[3] == 4 for row in occ_rows), "migrated hourly legacy entry should seed today's occurrences")
         by_id_second = {plan.entry_id: plan for plan in second_plans}
         self.assertEqual(by_id_second[2].action, "already_migrated")
         self.assertEqual(by_id_second[3].action, "already_migrated")
-        self.assertEqual(by_id_second[4].action, "manual_review")
+        self.assertEqual(by_id_second[4].action, "already_migrated")
 
     def test_cli_smoke_list_show_complete_complete_overdue_and_add(self):
         conn = sqlite3.connect(self.db_path)

@@ -1,5 +1,6 @@
 import importlib.util
 import io
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -47,6 +48,13 @@ class TodoHelpersTests(unittest.TestCase):
     def test_natural_language_parser_detects_complete_overdue(self):
         parsed = todo_module.parse_natural_language("自动完成逾期待办")
         self.assertEqual(parsed["cmd"], "complete-overdue")
+
+    def test_natural_language_parser_detects_every_four_hours(self):
+        parsed = todo_module.parse_natural_language("添加任务 每4小时 08:00 同步subagent记忆")
+        self.assertEqual(parsed["cmd"], "add")
+        self.assertEqual(parsed["cycle_type"], "hourly")
+        self.assertEqual(parsed["interval_hours"], 4)
+        self.assertEqual(parsed["time_of_day"], "08:00")
 
 
 class TodoListVisibilityTests(unittest.TestCase):
@@ -100,8 +108,8 @@ class TodoListVisibilityTests(unittest.TestCase):
         conn.execute("INSERT INTO groups (id, name) VALUES (1, 'Inbox')")
         conn.execute("INSERT INTO periodic_tasks (id, name, category, cycle_type, time_of_day) VALUES (1, '活跃周期任务', 'Inbox', 'daily', '09:00')")
         conn.execute("INSERT INTO periodic_tasks (id, name, category, cycle_type, time_of_day) VALUES (2, '已跳过周期任务', 'Inbox', 'daily', '10:00')")
-        conn.execute("INSERT INTO periodic_occurrences (id, task_id, date, status) VALUES (101, 1, '2026-03-25', 'pending')")
-        conn.execute("INSERT INTO periodic_occurrences (id, task_id, date, status) VALUES (102, 2, '2026-03-25', 'skipped')")
+        conn.execute("INSERT INTO periodic_occurrences (id, task_id, date, status, scheduled_time) VALUES (101, 1, '2026-03-25', 'pending', '09:00')")
+        conn.execute("INSERT INTO periodic_occurrences (id, task_id, date, status, scheduled_time) VALUES (102, 2, '2026-03-25', 'skipped', '10:00')")
         conn.execute("INSERT INTO entries (id, text, status, group_id) VALUES (11, '活跃普通任务', 'pending', 1)")
         conn.execute("INSERT INTO entries (id, text, status, group_id) VALUES (12, '已跳过普通任务', 'skipped', 1)")
         conn.commit()
@@ -132,6 +140,7 @@ class TodoListVisibilityTests(unittest.TestCase):
 
         output = buf.getvalue()
         self.assertIn('FIN-101', output)
+        self.assertIn('@ 09:00', output)
         self.assertIn('ID11', output)
         self.assertNotIn('FIN-102', output)
         self.assertNotIn('ID12', output)
@@ -159,6 +168,7 @@ class TodoOverdueCompletionTests(unittest.TestCase):
         self.workspace = Path(self.temp_dir.name) / "workspace"
         self.workspace.mkdir()
         (self.workspace / "memory").mkdir()
+        (self.workspace / "scripts").mkdir()
         self._init_db()
 
     def _init_db(self):
@@ -182,6 +192,7 @@ class TodoOverdueCompletionTests(unittest.TestCase):
                 name TEXT NOT NULL,
                 category TEXT,
                 cycle_type TEXT NOT NULL,
+                interval_hours INTEGER,
                 time_of_day TEXT,
                 count_current_month INTEGER DEFAULT 0,
                 special_handler TEXT,
@@ -214,13 +225,19 @@ class TodoOverdueCompletionTests(unittest.TestCase):
             "INSERT INTO periodic_tasks (id, name, category, cycle_type, time_of_day, count_current_month) VALUES (1, '周期测试任务', 'System', 'daily', '09:00', 0)"
         )
         conn.execute(
-            "INSERT INTO periodic_occurrences (id, task_id, date, status) VALUES (101, 1, '2026-03-25', 'pending')"
+            "INSERT INTO periodic_occurrences (id, task_id, date, status, scheduled_time) VALUES (101, 1, '2026-03-25', 'pending', '09:00')"
         )
         conn.execute(
             "INSERT INTO periodic_tasks (id, name, category, cycle_type, time_of_day, count_current_month, special_handler, task_kind, source, start_date) VALUES (2, 'Meta-Review fallback', 'System', 'daily', '02:00', 0, 'meta_review_fallback', 'system', 'system_seeded', '2026-03-01')"
         )
         conn.execute(
-            "INSERT INTO periodic_occurrences (id, task_id, date, status) VALUES (202, 2, '2026-03-25', 'pending')"
+            "INSERT INTO periodic_occurrences (id, task_id, date, status, scheduled_time) VALUES (202, 2, '2026-03-25', 'pending', '02:00')"
+        )
+        conn.execute(
+            "INSERT INTO periodic_tasks (id, name, category, cycle_type, interval_hours, time_of_day, count_current_month, special_handler, task_kind, source, start_date) VALUES (3, '同步 subagent 记忆', 'System', 'hourly', 4, '08:00', 0, 'sync_subagent_memory', 'system', 'legacy_entries_migrated', '2026-03-01')"
+        )
+        conn.execute(
+            "INSERT INTO periodic_occurrences (id, task_id, date, status, scheduled_time) VALUES (303, 3, '2026-03-25', 'pending', '08:00')"
         )
         conn.execute(
             "INSERT INTO entries (id, text, status, group_id) VALUES (16, 'Meta-Review (daily 02:00): Run meta_auditor.py analyze --days 1 and apply high-confidence suggestions', 'pending', 1)"
@@ -247,18 +264,17 @@ class TodoOverdueCompletionTests(unittest.TestCase):
         self.assertIsNone(entries[1]['special_handler'])
 
     def test_complete_overdue_tasks_runs_special_handler_from_periodic_metadata(self):
-        completed_activity_calls = []
+        list_sessions = json.dumps(['agent:main:subagent:abc', 'main'])
 
         def fake_run(args, capture_output=True, text=True, timeout=None):
-            if '--complete-activity' in args:
-                completed_activity_calls.append(args[-1])
+            if 'list-sessions' in args:
+                return type('Result', (), {'returncode': 0, 'stdout': list_sessions, 'stderr': ''})()
+            if 'sync' in args:
+                return type('Result', (), {'returncode': 0, 'stdout': 'Synced 2 memories from agent:main:subagent:abc\n', 'stderr': ''})()
+            return type('Result', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
 
-            class Result:
-                returncode = 0
-                stdout = ''
-                stderr = ''
-
-            return Result()
+        memory_manager_script = self.workspace / 'scripts' / 'memory_manager.py'
+        memory_manager_script.write_text('# stub', encoding='utf-8')
 
         with patch.object(todo_module, 'TODO_DB', self.db_path), \
              patch.object(todo_module, 'WORKSPACE', self.workspace), \
@@ -267,13 +283,14 @@ class TodoOverdueCompletionTests(unittest.TestCase):
             result = todo_module.complete_overdue_tasks(now=datetime(2026, 3, 25, 11, 30))
 
         self.assertFalse(result['errors'])
-        self.assertEqual(result['handled'], ['FIN-202', 'FIN-101', 'ID16', 'ID17'])
-        self.assertIn('2', completed_activity_calls)
-        self.assertIn('1', completed_activity_calls)
+        self.assertEqual(result['handled'], ['FIN-202', 'FIN-303', 'FIN-101', 'ID16', 'ID17'])
 
         conn = self._connect()
         special_row = conn.execute(
             "SELECT status, completion_mode, special_handler_result FROM periodic_occurrences WHERE id = 202"
+        ).fetchone()
+        sync_row = conn.execute(
+            "SELECT status, completion_mode, special_handler_result FROM periodic_occurrences WHERE id = 303"
         ).fetchone()
         occ_status = conn.execute("SELECT status FROM periodic_occurrences WHERE id = 101").fetchone()[0]
         meta_status = conn.execute("SELECT status FROM entries WHERE id = 16").fetchone()[0]
@@ -284,6 +301,9 @@ class TodoOverdueCompletionTests(unittest.TestCase):
         self.assertEqual(special_row[0], 'completed')
         self.assertEqual(special_row[1], 'fallback_handler')
         self.assertIn('Meta-Review fallback completed via direct PREDICTIONS.md/FRICTION.md inspection', special_row[2])
+        self.assertEqual(sync_row[0], 'completed')
+        self.assertEqual(sync_row[1], 'fallback_handler')
+        self.assertIn('Subagent memory sync completed', sync_row[2])
         self.assertEqual(occ_status, 'completed')
         self.assertEqual(meta_status, 'done')
         self.assertEqual(recurring_status, 'done')
@@ -291,26 +311,33 @@ class TodoOverdueCompletionTests(unittest.TestCase):
 
         memory_log = (self.workspace / 'memory' / '2026-03-25.md').read_text(encoding='utf-8')
         self.assertIn('Meta-Review fallback completed via direct PREDICTIONS.md/FRICTION.md inspection', memory_log)
+        self.assertIn('Subagent memory sync completed', memory_log)
 
     def test_complete_overdue_tasks_dry_run_does_not_change_state(self):
+        memory_manager_script = self.workspace / 'scripts' / 'memory_manager.py'
+        memory_manager_script.write_text('# stub', encoding='utf-8')
+
         with patch.object(todo_module, 'TODO_DB', self.db_path), \
              patch.object(todo_module, 'WORKSPACE', self.workspace), \
              patch.object(todo_module, 'subprocess') as mock_subprocess:
             mock_subprocess.run.return_value = type('Result', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
             result = todo_module.complete_overdue_tasks(now=datetime(2026, 3, 25, 11, 30), dry_run=True)
 
-        self.assertEqual(result['handled'], ['FIN-202', 'FIN-101', 'ID16', 'ID17'])
-        self.assertEqual(len(result['simulated']), 4)
+        self.assertEqual(result['handled'], ['FIN-202', 'FIN-303', 'FIN-101', 'ID16', 'ID17'])
+        self.assertEqual(len(result['simulated']), 5)
+        self.assertIn('FIN-303 同步 subagent 记忆 @ 08:00 [sync_subagent_memory]', result['simulated'])
 
         conn = self._connect()
         occ_status = conn.execute("SELECT status FROM periodic_occurrences WHERE id = 101").fetchone()[0]
         meta_status = conn.execute("SELECT status FROM entries WHERE id = 16").fetchone()[0]
         special_status = conn.execute("SELECT status FROM periodic_occurrences WHERE id = 202").fetchone()[0]
+        sync_status = conn.execute("SELECT status FROM periodic_occurrences WHERE id = 303").fetchone()[0]
         conn.close()
 
         self.assertEqual(occ_status, 'pending')
         self.assertEqual(meta_status, 'pending')
         self.assertEqual(special_status, 'pending')
+        self.assertEqual(sync_status, 'pending')
         self.assertFalse((self.workspace / 'memory' / '2026-03-25.md').exists())
 
 

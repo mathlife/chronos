@@ -4,9 +4,10 @@
 This script intentionally migrates only deterministic cases:
 - existing canonical tasks that can be linked back to a legacy entry by normalized name
 - explicit Meta-Review legacy rows -> daily system task with meta_review_fallback handler
+- legacy every-N-hours subagent-memory sync rows -> hourly system task with sync_subagent_memory handler
 - simple bracketed recurring rows with deterministic weekly/daily/monthly_n_times schedules
 
-It does NOT auto-migrate ambiguous rows or unsupported cadences like every-N-hours.
+It does NOT auto-migrate ambiguous rows beyond those patterns.
 """
 from __future__ import annotations
 
@@ -76,6 +77,8 @@ def normalize_legacy_name(text: str) -> str:
         return match.group('name').strip()
     if META_REVIEW_PATTERN.search(text):
         return 'Meta-Review fallback'
+    if EVERY_N_HOURS_PATTERN.search(text) and 'subagent' in text.lower():
+        return '同步 subagent 记忆'
     return text
 
 
@@ -141,6 +144,35 @@ def build_meta_review_task(entry: sqlite3.Row) -> dict[str, Any]:
         'source': 'legacy_entries_migrated',
         'legacy_entry_id': entry['id'],
         'special_handler': 'meta_review_fallback',
+        'handler_payload': json.dumps(payload, ensure_ascii=False),
+        'start_date': start_date,
+    }
+
+
+def build_every_n_hours_task(entry: sqlite3.Row, interval_hours: int, anchor_time: str | None) -> dict[str, Any]:
+    start_date = None
+    created_at = entry['created_at'] if 'created_at' in entry.keys() else None
+    if created_at:
+        try:
+            start_date = str(created_at)[:10]
+            date.fromisoformat(start_date)
+        except ValueError:
+            start_date = None
+    payload = {
+        'command': 'memory_manager.py sync <subagent_session_id>',
+        'session_filter': ':subagent:',
+        'note': 'Migrated from legacy every-N-hours entry; sync all recorded subagent sessions into main memory.',
+    }
+    return {
+        'name': '同步 subagent 记忆',
+        'category': entry['group_name'] or 'System',
+        'cycle_type': 'hourly',
+        'interval_hours': interval_hours,
+        'time_of_day': anchor_time or '00:00',
+        'task_kind': 'system',
+        'source': 'legacy_entries_migrated',
+        'legacy_entry_id': entry['id'],
+        'special_handler': 'sync_subagent_memory',
         'handler_payload': json.dumps(payload, ensure_ascii=False),
         'start_date': start_date,
     }
@@ -229,6 +261,20 @@ def classify_entry(conn: sqlite3.Connection, entry: sqlite3.Row) -> MigrationPla
         )
 
     every_hours = EVERY_N_HOURS_PATTERN.search(entry['text'])
+    if every_hours and 'subagent' in entry['text'].lower() and 'memory_manager.py sync' in entry['text']:
+        interval_hours = int(every_hours.group(1))
+        anchor_time = parse_time(entry['text']) or '00:00'
+        return MigrationPlan(
+            entry_id=entry['id'],
+            text=entry['text'],
+            status=entry['status'],
+            group_name=entry['group_name'] or 'Inbox',
+            action='create_task',
+            reason='deterministic every-N-hours subagent memory sync system task',
+            normalized_name='同步 subagent 记忆',
+            task_params=build_every_n_hours_task(entry, interval_hours, anchor_time),
+        )
+
     if every_hours:
         return MigrationPlan(
             entry_id=entry['id'],
@@ -236,9 +282,9 @@ def classify_entry(conn: sqlite3.Connection, entry: sqlite3.Row) -> MigrationPla
             status=entry['status'],
             group_name=entry['group_name'] or 'Inbox',
             action='manual_review',
-            reason='unsupported every-N-hours cadence in current periodic model',
+            reason='unsupported every-N-hours cadence outside known system sync migration',
             normalized_name=normalized_name,
-            unsupported_details=f"every {every_hours.group(1)} hours requires a later cadence extension or external orchestrator",
+            unsupported_details=f"every {every_hours.group(1)} hours requires explicit handler semantics or manual mapping",
         )
 
     parsed = build_simple_schedule_task(entry)
@@ -278,39 +324,44 @@ def classify_entry(conn: sqlite3.Connection, entry: sqlite3.Row) -> MigrationPla
 
 
 def insert_task(conn: sqlite3.Connection, params: dict[str, Any]) -> int:
-    cur = conn.execute(
-        """
-        INSERT INTO periodic_tasks
-        (name, category, cycle_type, weekday, day_of_month, range_start, range_end, n_per_month,
-         time_of_day, event_time, timezone, is_active, count_current_month, end_date, reminder_template,
-         dates_list, task_kind, source, legacy_entry_id, special_handler, handler_payload, start_date,
-         delivery_target, delivery_mode, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Asia/Shanghai', 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        """,
-        (
-            params.get('name'),
-            params.get('category', 'Inbox'),
-            params.get('cycle_type', 'once'),
-            params.get('weekday'),
-            params.get('day_of_month'),
-            params.get('range_start'),
-            params.get('range_end'),
-            params.get('n_per_month'),
-            params.get('time_of_day', '09:00'),
-            params.get('time_of_day', '09:00'),
-            params.get('end_date'),
-            params.get('reminder_template'),
-            params.get('dates_list'),
-            params.get('task_kind', 'scheduled'),
-            params.get('source', 'legacy_entries_migrated'),
-            params.get('legacy_entry_id'),
-            params.get('special_handler'),
-            params.get('handler_payload'),
-            params.get('start_date'),
-            params.get('delivery_target'),
-            params.get('delivery_mode'),
-        ),
+    task_columns = {row[1] for row in conn.execute("PRAGMA table_info(periodic_tasks)").fetchall()}
+    column_values = {
+        'name': params.get('name'),
+        'category': params.get('category', 'Inbox'),
+        'cycle_type': params.get('cycle_type', 'once'),
+        'weekday': params.get('weekday'),
+        'day_of_month': params.get('day_of_month'),
+        'range_start': params.get('range_start'),
+        'range_end': params.get('range_end'),
+        'n_per_month': params.get('n_per_month'),
+        'interval_hours': params.get('interval_hours'),
+        'time_of_day': params.get('time_of_day', '09:00'),
+        'event_time': params.get('time_of_day', '09:00'),
+        'end_date': params.get('end_date'),
+        'reminder_template': params.get('reminder_template'),
+        'dates_list': params.get('dates_list'),
+        'task_kind': params.get('task_kind', 'scheduled'),
+        'source': params.get('source', 'legacy_entries_migrated'),
+        'legacy_entry_id': params.get('legacy_entry_id'),
+        'special_handler': params.get('special_handler'),
+        'handler_payload': params.get('handler_payload'),
+        'start_date': params.get('start_date'),
+        'delivery_target': params.get('delivery_target'),
+        'delivery_mode': params.get('delivery_mode'),
+    }
+    ordered_columns = [
+        'name', 'category', 'cycle_type', 'weekday', 'day_of_month', 'range_start', 'range_end', 'n_per_month',
+        'interval_hours', 'time_of_day', 'event_time', 'end_date', 'reminder_template', 'dates_list', 'task_kind',
+        'source', 'legacy_entry_id', 'special_handler', 'handler_payload', 'start_date', 'delivery_target', 'delivery_mode'
+    ]
+    columns = [column for column in ordered_columns if column in task_columns]
+    placeholders = ', '.join('?' for _ in columns)
+    sql = (
+        f"INSERT INTO periodic_tasks ({', '.join(columns)}, timezone, is_active, count_current_month, created_at, updated_at) "
+        f"VALUES ({placeholders}, 'Asia/Shanghai', 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
     )
+    values = tuple(column_values[column] for column in columns)
+    cur = conn.execute(sql, values)
     return int(cur.lastrowid)
 
 
@@ -328,6 +379,7 @@ def maybe_seed_occurrence(conn: sqlite3.Connection, task_id: int, params: dict[s
         range_start=params.get('range_start'),
         range_end=params.get('range_end'),
         n_per_month=params.get('n_per_month'),
+        interval_hours=params.get('interval_hours'),
         time_of_day=params.get('time_of_day', '09:00'),
         event_time=params.get('time_of_day', '09:00'),
         dates_list=params.get('dates_list'),
@@ -344,6 +396,44 @@ def maybe_seed_occurrence(conn: sqlite3.Connection, task_id: int, params: dict[s
     scheduler = TaskScheduler(task, today)
     if not scheduler.should_remind_today():
         return False
+
+    if params.get('cycle_type') == 'hourly':
+        seeded_any = False
+        occurrence_columns = {row[1] for row in conn.execute("PRAGMA table_info(periodic_occurrences)").fetchall()}
+        occurrence_sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='periodic_occurrences'").fetchone()[0]
+        unique_by_time = 'UNIQUE(task_id, date, scheduled_time)' in occurrence_sql
+        for scheduled_time in scheduler.get_hourly_schedule_for_day(today):
+            scheduled_at = f"{today.isoformat()}T{scheduled_time}:00"
+            if unique_by_time:
+                conn.execute(
+                    """
+                    INSERT INTO periodic_occurrences (task_id, date, status, scheduled_time, scheduled_at, legacy_entry_id)
+                    VALUES (?, ?, 'pending', ?, ?, ?)
+                    """,
+                    (task_id, today.isoformat(), scheduled_time, scheduled_at, params.get('legacy_entry_id')),
+                )
+                seeded_any = True
+            else:
+                if seeded_any:
+                    continue
+                insert_columns = ['task_id', 'date', 'status']
+                insert_values = [task_id, today.isoformat(), 'pending']
+                if 'scheduled_time' in occurrence_columns:
+                    insert_columns.append('scheduled_time')
+                    insert_values.append(scheduled_time)
+                if 'scheduled_at' in occurrence_columns:
+                    insert_columns.append('scheduled_at')
+                    insert_values.append(scheduled_at)
+                if 'legacy_entry_id' in occurrence_columns:
+                    insert_columns.append('legacy_entry_id')
+                    insert_values.append(params.get('legacy_entry_id'))
+                placeholders = ', '.join('?' for _ in insert_columns)
+                conn.execute(
+                    f"INSERT OR IGNORE INTO periodic_occurrences ({', '.join(insert_columns)}) VALUES ({placeholders})",
+                    tuple(insert_values),
+                )
+                seeded_any = True
+        return seeded_any
 
     scheduled_time = params.get('time_of_day')
     scheduled_at = f"{today.isoformat()}T{scheduled_time}:00" if scheduled_time else None

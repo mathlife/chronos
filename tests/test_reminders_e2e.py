@@ -49,6 +49,7 @@ def create_test_db(db_path: Path):
             range_start INTEGER,
             range_end INTEGER,
             n_per_month INTEGER,
+            interval_hours INTEGER,
             time_of_day TEXT,
             event_time TEXT,
             timezone TEXT DEFAULT 'Asia/Shanghai',
@@ -84,7 +85,8 @@ def create_test_db(db_path: Path):
             special_handler_result TEXT,
             scheduled_time TEXT,
             scheduled_at TEXT,
-            legacy_entry_id INTEGER
+            legacy_entry_id INTEGER,
+            UNIQUE(task_id, date, scheduled_time)
         )
         """
     )
@@ -186,8 +188,8 @@ class ReminderEndToEndTests(unittest.TestCase):
 
     def test_cleanup_old_jobs_clears_db_reference_after_cron_remove(self):
         self.conn.execute(
-            "INSERT INTO periodic_occurrences (task_id, date, status, reminder_job_id) VALUES (?, ?, ?, ?)",
-            (1, "2026-03-22", "pending", "task_reminder_1_20260322"),
+            "INSERT INTO periodic_occurrences (task_id, date, status, reminder_job_id, scheduled_time) VALUES (?, ?, ?, ?, ?)",
+            (1, "2026-03-22", "pending", "task_reminder_1_20260322", "10:00"),
         )
         self.conn.commit()
 
@@ -229,6 +231,28 @@ class ReminderEndToEndTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row["scheduled_time"], "11:00")
         self.assertEqual(row["scheduled_at"], "2026-03-23T11:00:00")
+
+    def test_ensure_today_occurrences_expands_hourly_task_into_multiple_slots(self):
+        self.conn.execute(
+            """
+            INSERT INTO periodic_tasks (
+                id, name, category, cycle_type, interval_hours, time_of_day, event_time, timezone,
+                is_active, count_current_month, task_kind, source, start_date, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (3, "每4小时同步", "System", "hourly", 4, "08:00", "08:00", "Asia/Shanghai", 1, 0, 'system', 'chronos', '2026-03-01'),
+        )
+        self.conn.commit()
+
+        with patch.object(self.module, "to_shanghai_date", return_value=date(2026, 3, 23)):
+            count = self.manager.ensure_today_occurrences()
+
+        self.assertEqual(count, 7)
+        rows = self.conn.execute(
+            "SELECT scheduled_time FROM periodic_occurrences WHERE task_id = 3 AND date = ? ORDER BY scheduled_time",
+            ("2026-03-23",),
+        ).fetchall()
+        self.assertEqual([row[0] for row in rows], ['00:00', '04:00', '08:00', '12:00', '16:00', '20:00'])
 
 
 if __name__ == "__main__":

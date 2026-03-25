@@ -6,6 +6,7 @@ from typing import Optional
 ALLOWED_CYCLE_TYPES = (
     'once',
     'daily',
+    'hourly',
     'weekly',
     'monthly_fixed',
     'monthly_range',
@@ -19,13 +20,14 @@ class PeriodicTask:
     id: int
     name: str
     category: str = 'Inbox'
-    cycle_type: str = 'once'  # once|daily|weekly|monthly_fixed|monthly_range|monthly_n_times|monthly_dates
+    cycle_type: str = 'once'  # once|daily|hourly|weekly|monthly_fixed|monthly_range|monthly_n_times|monthly_dates
     weekday: Optional[int] = None  # 0-6 (0=Monday, Python weekday)
     day_of_month: Optional[int] = None  # 1-31
     range_start: Optional[int] = None
     range_end: Optional[int] = None
     n_per_month: Optional[int] = None
-    time_of_day: Optional[str] = '09:00'  # HH:MM
+    interval_hours: Optional[int] = None
+    time_of_day: Optional[str] = '09:00'  # HH:MM; for hourly this is the anchor slot in each day
     event_time: Optional[str] = None
     timezone: str = 'Asia/Shanghai'
     is_active: bool = True
@@ -51,6 +53,10 @@ class PeriodicTask:
     @property
     def is_monthly_n_times(self) -> bool:
         return self.cycle_type == 'monthly_n_times'
+
+    @property
+    def is_hourly(self) -> bool:
+        return self.cycle_type == 'hourly'
 
 
 @dataclass

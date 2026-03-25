@@ -20,6 +20,7 @@ TASK_SCHEMA_COLUMNS = {
     'delivery_target': "ALTER TABLE periodic_tasks ADD COLUMN delivery_target TEXT",
     'delivery_mode': "ALTER TABLE periodic_tasks ADD COLUMN delivery_mode TEXT",
     'dates_list': "ALTER TABLE periodic_tasks ADD COLUMN dates_list TEXT",
+    'interval_hours': "ALTER TABLE periodic_tasks ADD COLUMN interval_hours INTEGER",
 }
 
 OCCURRENCE_SCHEMA_COLUMNS = {
@@ -116,6 +117,53 @@ def _ensure_table_columns(db: DB, table_name: str, statements: dict[str, str]) -
         db.commit()
 
 
+def _get_table_sql(db: DB, table_name: str) -> str:
+    row = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name = ?", (table_name,)).fetchone()
+    return row[0] if row and row[0] else ""
+
+
+def _rebuild_occurrences_for_hourly(db: DB) -> None:
+    sql = _get_table_sql(db, 'periodic_occurrences')
+    if 'UNIQUE(task_id, date, scheduled_time)' in sql:
+        return
+
+    db.execute("ALTER TABLE periodic_occurrences RENAME TO periodic_occurrences_old")
+    db.execute(
+        """
+        CREATE TABLE periodic_occurrences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            reminder_job_id TEXT,
+            is_auto_completed BOOLEAN DEFAULT 0,
+            completed_at TEXT,
+            completion_mode TEXT,
+            special_handler_result TEXT,
+            scheduled_time TEXT,
+            scheduled_at TEXT,
+            legacy_entry_id INTEGER,
+            FOREIGN KEY (task_id) REFERENCES periodic_tasks(id) ON DELETE CASCADE,
+            UNIQUE(task_id, date, scheduled_time)
+        )
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO periodic_occurrences (
+            id, task_id, date, status, reminder_job_id, is_auto_completed, completed_at,
+            completion_mode, special_handler_result, scheduled_time, scheduled_at, legacy_entry_id
+        )
+        SELECT
+            id, task_id, date, status, reminder_job_id, COALESCE(is_auto_completed, 0), completed_at,
+            completion_mode, special_handler_result, scheduled_time, scheduled_at, legacy_entry_id
+        FROM periodic_occurrences_old
+        """
+    )
+    db.execute("DROP TABLE periodic_occurrences_old")
+    db.commit()
+
+
 def ensure_schema(db: Optional[DB] = None):
     """Ensure database schema has all phase-1 Chronos columns."""
     db = db or DB()
@@ -131,3 +179,4 @@ def ensure_schema(db: Optional[DB] = None):
     ).fetchone()
     if occurrences_table:
         _ensure_table_columns(db, 'periodic_occurrences', OCCURRENCE_SCHEMA_COLUMNS)
+        _rebuild_occurrences_for_hourly(db)

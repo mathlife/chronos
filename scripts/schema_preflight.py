@@ -12,7 +12,7 @@ from core.models import ALLOWED_CYCLE_TYPES
 
 ALLOWED_OCCURRENCE_STATUSES = {"pending", "completed", "skipped", "reminded"}
 REQUIRED_TABLES = {"periodic_tasks", "periodic_occurrences"}
-REQUIRED_TASK_COLUMNS = {"task_kind", "source", "special_handler", "start_date", "delivery_target", "delivery_mode"}
+REQUIRED_TASK_COLUMNS = {"task_kind", "source", "special_handler", "start_date", "delivery_target", "delivery_mode", "interval_hours"}
 REQUIRED_OCCURRENCE_COLUMNS = {"completion_mode", "special_handler_result", "scheduled_time", "scheduled_at"}
 
 
@@ -116,7 +116,10 @@ def inspect_schema() -> dict:
 
         info["checks"] = {
             "tables_present": sorted(REQUIRED_TABLES),
-            "periodic_occurrences_unique_task_date": "UNIQUE(task_id, date)" in occurrences_sql,
+            "periodic_occurrences_unique_task_date": (
+                "UNIQUE(task_id, date, scheduled_time)" in occurrences_sql
+                or "UNIQUE(task_id, date)" in occurrences_sql
+            ),
             "periodic_occurrences_fk_task_id": "FOREIGN KEY (task_id) REFERENCES periodic_tasks(id) ON DELETE CASCADE" in occurrences_sql,
             "periodic_tasks_name_unique": "name TEXT NOT NULL UNIQUE" in tasks_sql,
             "required_task_columns_present": sorted(REQUIRED_TASK_COLUMNS - task_columns) == [],

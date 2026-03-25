@@ -45,6 +45,8 @@ def validate_add_params(args: argparse.Namespace) -> None:
         raise ValueError("range-end must be 1-31")
     if args.n_per_month is not None and args.n_per_month <= 0:
         raise ValueError("n-per-month must be > 0")
+    if args.interval_hours is not None and (args.interval_hours <= 0 or args.interval_hours > 24):
+        raise ValueError("interval-hours must be 1-24")
     if args.end_date:
         try:
             date.fromisoformat(args.end_date)
@@ -72,6 +74,8 @@ def validate_add_params(args: argparse.Namespace) -> None:
 
     if args.cycle_type == 'once' and not args.start_date:
         raise ValueError("scheduled once tasks require --start-date YYYY-MM-DD")
+    if args.cycle_type == 'hourly' and args.interval_hours is None:
+        args.interval_hours = 1
     if args.cycle_type == 'weekly' and args.weekday is None:
         raise ValueError("weekly tasks require --weekday")
     if args.cycle_type == 'monthly_fixed' and args.day_of_month is None:
@@ -100,6 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--range-start", type=int)
     parser.add_argument("--range-end", type=int)
     parser.add_argument("--n-per-month", type=int)
+    parser.add_argument("--interval-hours", type=int)
     parser.add_argument("--dates-list")
     parser.add_argument("--start-date")
     parser.add_argument("--end-date")
@@ -128,10 +133,10 @@ class PeriodicTaskManager:
                 """
                 INSERT INTO periodic_tasks
                 (name, category, cycle_type, weekday, day_of_month, range_start, range_end, n_per_month,
-                 time_of_day, event_time, timezone, is_active, count_current_month, end_date, reminder_template,
+                 interval_hours, time_of_day, event_time, timezone, is_active, count_current_month, end_date, reminder_template,
                  dates_list, task_kind, source, legacy_entry_id, special_handler, handler_payload, start_date,
                  delivery_target, delivery_mode, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Asia/Shanghai', 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Asia/Shanghai', 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
                 (
                     params.get('name'),
@@ -142,6 +147,7 @@ class PeriodicTaskManager:
                     params.get('range_start'),
                     params.get('range_end'),
                     params.get('n_per_month'),
+                    params.get('interval_hours'),
                     params.get('time_of_day', '09:00'),
                     params.get('time_of_day', '09:00'),
                     params.get('end_date'),
@@ -175,9 +181,9 @@ class PeriodicTaskManager:
                 db_commit()
                 clear_task_cache()
 
-    def create_occurrence_if_missing(self, task_id: int, occ_date: date) -> int:
+    def create_occurrence_if_missing(self, task_id: int, occ_date: date, scheduled_time: str | None = None) -> int:
         task = get_periodic_task(task_id)
-        scheduled_time = task.get('time_of_day') if task else None
+        scheduled_time = scheduled_time or (task.get('time_of_day') if task else None)
         scheduled_at = None
         if scheduled_time:
             scheduled_at = f"{occ_date.isoformat()}T{scheduled_time}:00"
@@ -189,6 +195,13 @@ class PeriodicTaskManager:
             (task_id, occ_date.isoformat(), scheduled_time, scheduled_at),
         )
         db_commit()
+        cur = self.db.execute(
+            "SELECT id FROM periodic_occurrences WHERE task_id = ? AND date = ? AND COALESCE(scheduled_time, '') = COALESCE(?, '')",
+            (task_id, occ_date.isoformat(), scheduled_time),
+        )
+        row = cur.fetchone()
+        if row:
+            return row[0]
         cur = self.db.execute("SELECT id FROM periodic_occurrences WHERE task_id = ? AND date = ?", (task_id, occ_date.isoformat()))
         row = cur.fetchone()
         return row[0] if row else None
@@ -244,7 +257,16 @@ class PeriodicTaskManager:
             return None
 
         iso_time = utc_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        job_name = f"task_reminder_{task_id}_{occ_date.strftime('%Y%m%d')}"
+        try:
+            task_row = get_periodic_task(task_id) or {}
+        except Exception:
+            task_row = {}
+        cycle_type = task_row.get('cycle_type')
+        interval_hours = task_row.get('interval_hours')
+        if cycle_type == 'hourly' and interval_hours not in (None, 24):
+            job_name = f"task_reminder_{task_id}_{occ_date.strftime('%Y%m%d')}_{time_of_day.replace(':', '')}"
+        else:
+            job_name = f"task_reminder_{task_id}_{occ_date.strftime('%Y%m%d')}"
         message_text = self._format_reminder_message(task_name, occ_date, time_of_day, reminder_template, immediate=False)
 
         cmd = build_cron_add_command(job_name=job_name, at_iso=iso_time, message=message_text, chat_id=chat_id)
@@ -272,29 +294,26 @@ class PeriodicTaskManager:
             if not scheduler.should_remind_today():
                 continue
 
-            occ_id = self.create_occurrence_if_missing(task.id, today)
-            if not occ_id:
-                cur = self.db.execute("SELECT id FROM periodic_occurrences WHERE task_id = ? AND date = ?", (task.id, today.isoformat()))
-                row = cur.fetchone()
-                if row:
-                    occ_id = row[0]
-                else:
+            schedule_times = scheduler.get_hourly_schedule_for_day(today) if task.cycle_type == 'hourly' else [task.time_of_day]
+            for schedule_time in schedule_times:
+                if not schedule_time:
+                    continue
+                occ_id = self.create_occurrence_if_missing(task.id, today, scheduled_time=schedule_time)
+                if not occ_id:
                     continue
 
-            cur = self.db.execute("SELECT status, reminder_job_id FROM periodic_occurrences WHERE id = ?", (occ_id,))
-            status, job_name = cur.fetchone()
-            if status not in ('pending', 'reminded'):
-                continue
-            if task.cycle_type == 'once' and task.start_date and task.start_date != today.isoformat():
-                continue
-            if not task.time_of_day:
-                continue
-            if not job_name:
-                job_name = self.schedule_reminder_cron(task.id, today, task.time_of_day)
-                if job_name:
-                    self.db.execute("UPDATE periodic_occurrences SET reminder_job_id = ? WHERE id = ?", (job_name, occ_id))
-                    db_commit()
-                    scheduled += 1
+                cur = self.db.execute("SELECT status, reminder_job_id FROM periodic_occurrences WHERE id = ?", (occ_id,))
+                status, job_name = cur.fetchone()
+                if status not in ('pending', 'reminded'):
+                    continue
+                if task.cycle_type == 'once' and task.start_date and task.start_date != today.isoformat():
+                    continue
+                if not job_name:
+                    job_name = self.schedule_reminder_cron(task.id, today, schedule_time)
+                    if job_name:
+                        self.db.execute("UPDATE periodic_occurrences SET reminder_job_id = ? WHERE id = ?", (job_name, occ_id))
+                        db_commit()
+                        scheduled += 1
 
         return scheduled
 
@@ -437,30 +456,32 @@ class PeriodicTaskManager:
             if not scheduler.should_remind_today():
                 continue
 
-            occ_id = self.create_occurrence_if_missing(task.id, today)
-            if occ_id:
-                count += 1
+            schedule_times = scheduler.get_hourly_schedule_for_day(today) if task.cycle_type == 'hourly' else [task.time_of_day]
+            for schedule_time in schedule_times:
+                occ_id = self.create_occurrence_if_missing(task.id, today, scheduled_time=schedule_time)
+                if occ_id:
+                    count += 1
 
         return count
 
     def _build_today_todo_snapshot(self, today: date) -> str:
         active_periodic_rows = self.db.execute(
             """
-            SELECT o.id, o.date, o.status, t.name, t.cycle_type
+            SELECT o.id, o.date, o.status, t.name, t.cycle_type, o.scheduled_time
             FROM periodic_occurrences o
             JOIN periodic_tasks t ON o.task_id = t.id
             WHERE o.date = ? AND o.status IN ('pending', 'reminded')
-            ORDER BY t.time_of_day, t.name, o.id
+            ORDER BY COALESCE(o.scheduled_time, t.time_of_day), t.name, o.id
             """,
             (today.isoformat(),),
         ).fetchall()
         skipped_periodic_rows = self.db.execute(
             """
-            SELECT o.id, o.date, o.status, t.name, t.cycle_type
+            SELECT o.id, o.date, o.status, t.name, t.cycle_type, o.scheduled_time
             FROM periodic_occurrences o
             JOIN periodic_tasks t ON o.task_id = t.id
             WHERE o.date = ? AND o.status = 'skipped'
-            ORDER BY t.time_of_day, t.name, o.id
+            ORDER BY COALESCE(o.scheduled_time, t.time_of_day), t.name, o.id
             """,
             (today.isoformat(),),
         ).fetchall()
@@ -500,7 +521,8 @@ class PeriodicTaskManager:
                 status = row['status']
                 if status == 'reminded':
                     status = '已提醒'
-                lines.append(f"- FIN-{row['id']} | {row['name']} ({row['cycle_type']}) | {status}")
+                schedule_suffix = f" @ {row['scheduled_time']}" if row['scheduled_time'] else ''
+                lines.append(f"- FIN-{row['id']} | {row['name']} ({row['cycle_type']}){schedule_suffix} | {status}")
         else:
             lines.append("")
             lines.append("【今日周期任务】")
@@ -524,7 +546,8 @@ class PeriodicTaskManager:
             lines.append("")
             lines.append(f"【已跳过】共 {skipped_total} 项（默认不混入活跃待办）")
             for row in skipped_periodic_rows:
-                lines.append(f"- FIN-{row['id']} | {row['name']} ({row['cycle_type']}) | 已跳过")
+                schedule_suffix = f" @ {row['scheduled_time']}" if row['scheduled_time'] else ''
+                lines.append(f"- FIN-{row['id']} | {row['name']} ({row['cycle_type']}){schedule_suffix} | 已跳过")
             for row in skipped_simple_rows:
                 lines.append(f"- ID{row['id']} | {row['group_name']} | {row['text']} | 已跳过")
 
@@ -599,6 +622,8 @@ def main():
                 params['range_end'] = args.range_end
             if args.n_per_month is not None:
                 params['n_per_month'] = args.n_per_month
+            if args.interval_hours is not None:
+                params['interval_hours'] = args.interval_hours
             if args.dates_list is not None:
                 params['dates_list'] = args.dates_list
             if args.start_date is not None:
