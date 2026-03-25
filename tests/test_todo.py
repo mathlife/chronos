@@ -237,7 +237,13 @@ class TodoOverdueCompletionTests(unittest.TestCase):
             "INSERT INTO periodic_tasks (id, name, category, cycle_type, interval_hours, time_of_day, count_current_month, special_handler, task_kind, source, start_date) VALUES (3, '同步 subagent 记忆', 'System', 'hourly', 4, '08:00', 0, 'sync_subagent_memory', 'system', 'legacy_entries_migrated', '2026-03-01')"
         )
         conn.execute(
-            "INSERT INTO periodic_occurrences (id, task_id, date, status, scheduled_time) VALUES (303, 3, '2026-03-25', 'pending', '08:00')"
+            "INSERT INTO periodic_occurrences (id, task_id, date, status, scheduled_time) VALUES (303, 3, '2026-03-25', 'pending', '00:00')"
+        )
+        conn.execute(
+            "INSERT INTO periodic_occurrences (id, task_id, date, status, scheduled_time) VALUES (304, 3, '2026-03-25', 'pending', '04:00')"
+        )
+        conn.execute(
+            "INSERT INTO periodic_occurrences (id, task_id, date, status, scheduled_time) VALUES (305, 3, '2026-03-25', 'pending', '08:00')"
         )
         conn.execute(
             "INSERT INTO entries (id, text, status, group_id) VALUES (16, 'Meta-Review (daily 02:00): Run meta_auditor.py analyze --days 1 and apply high-confidence suggestions', 'pending', 1)"
@@ -283,15 +289,15 @@ class TodoOverdueCompletionTests(unittest.TestCase):
             result = todo_module.complete_overdue_tasks(now=datetime(2026, 3, 25, 11, 30))
 
         self.assertFalse(result['errors'])
-        self.assertEqual(result['handled'], ['FIN-202', 'FIN-303', 'FIN-101', 'ID16', 'ID17'])
+        self.assertEqual(result['handled'], ['FIN-303', 'FIN-202', 'FIN-304', 'FIN-305', 'FIN-101', 'ID16', 'ID17'])
 
         conn = self._connect()
         special_row = conn.execute(
             "SELECT status, completion_mode, special_handler_result FROM periodic_occurrences WHERE id = 202"
         ).fetchone()
-        sync_row = conn.execute(
-            "SELECT status, completion_mode, special_handler_result FROM periodic_occurrences WHERE id = 303"
-        ).fetchone()
+        sync_rows = conn.execute(
+            "SELECT id, status, completion_mode, special_handler_result FROM periodic_occurrences WHERE id IN (303, 304, 305) ORDER BY id"
+        ).fetchall()
         occ_status = conn.execute("SELECT status FROM periodic_occurrences WHERE id = 101").fetchone()[0]
         meta_status = conn.execute("SELECT status FROM entries WHERE id = 16").fetchone()[0]
         recurring_status = conn.execute("SELECT status FROM entries WHERE id = 17").fetchone()[0]
@@ -301,9 +307,12 @@ class TodoOverdueCompletionTests(unittest.TestCase):
         self.assertEqual(special_row[0], 'completed')
         self.assertEqual(special_row[1], 'fallback_handler')
         self.assertIn('Meta-Review fallback completed via direct PREDICTIONS.md/FRICTION.md inspection', special_row[2])
-        self.assertEqual(sync_row[0], 'completed')
-        self.assertEqual(sync_row[1], 'fallback_handler')
-        self.assertIn('Subagent memory sync completed', sync_row[2])
+        self.assertEqual([row[1] for row in sync_rows], ['completed', 'completed', 'completed'])
+        self.assertEqual([row[2] for row in sync_rows], ['fallback_handler_merged', 'fallback_handler_merged', 'fallback_handler_merged'])
+        for index, row in enumerate(sync_rows, start=1):
+            self.assertIn('Subagent memory sync completed', row[3])
+            self.assertIn('merge_key=sync_subagent_memory:3:2026-03-25', row[3])
+            self.assertIn(f'merged occurrence {index}/3', row[3])
         self.assertEqual(occ_status, 'completed')
         self.assertEqual(meta_status, 'done')
         self.assertEqual(recurring_status, 'done')
@@ -311,7 +320,7 @@ class TodoOverdueCompletionTests(unittest.TestCase):
 
         memory_log = (self.workspace / 'memory' / '2026-03-25.md').read_text(encoding='utf-8')
         self.assertIn('Meta-Review fallback completed via direct PREDICTIONS.md/FRICTION.md inspection', memory_log)
-        self.assertIn('Subagent memory sync completed', memory_log)
+        self.assertEqual(memory_log.count('Subagent memory sync completed'), 1)
 
     def test_complete_overdue_tasks_dry_run_does_not_change_state(self):
         memory_manager_script = self.workspace / 'scripts' / 'memory_manager.py'
@@ -323,21 +332,23 @@ class TodoOverdueCompletionTests(unittest.TestCase):
             mock_subprocess.run.return_value = type('Result', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
             result = todo_module.complete_overdue_tasks(now=datetime(2026, 3, 25, 11, 30), dry_run=True)
 
-        self.assertEqual(result['handled'], ['FIN-202', 'FIN-303', 'FIN-101', 'ID16', 'ID17'])
-        self.assertEqual(len(result['simulated']), 5)
-        self.assertIn('FIN-303 同步 subagent 记忆 @ 08:00 [sync_subagent_memory]', result['simulated'])
+        self.assertEqual(result['handled'], ['FIN-303', 'FIN-202', 'FIN-304', 'FIN-305', 'FIN-101', 'ID16', 'ID17'])
+        self.assertEqual(len(result['simulated']), 7)
+        self.assertIn('FIN-303 同步 subagent 记忆 @ 00:00 [sync_subagent_memory] [merge-once day-batch x3]', result['simulated'])
+        self.assertIn('FIN-304 同步 subagent 记忆 @ 04:00 [sync_subagent_memory] [merge-once day-batch x3]', result['simulated'])
+        self.assertIn('FIN-305 同步 subagent 记忆 @ 08:00 [sync_subagent_memory] [merge-once day-batch x3]', result['simulated'])
 
         conn = self._connect()
         occ_status = conn.execute("SELECT status FROM periodic_occurrences WHERE id = 101").fetchone()[0]
         meta_status = conn.execute("SELECT status FROM entries WHERE id = 16").fetchone()[0]
         special_status = conn.execute("SELECT status FROM periodic_occurrences WHERE id = 202").fetchone()[0]
-        sync_status = conn.execute("SELECT status FROM periodic_occurrences WHERE id = 303").fetchone()[0]
+        sync_rows = conn.execute("SELECT status FROM periodic_occurrences WHERE id IN (303, 304, 305) ORDER BY id").fetchall()
         conn.close()
 
         self.assertEqual(occ_status, 'pending')
         self.assertEqual(meta_status, 'pending')
         self.assertEqual(special_status, 'pending')
-        self.assertEqual(sync_status, 'pending')
+        self.assertEqual([row[0] for row in sync_rows], ['pending', 'pending', 'pending'])
         self.assertFalse((self.workspace / 'memory' / '2026-03-25.md').exists())
 
 

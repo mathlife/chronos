@@ -55,6 +55,8 @@ Expansion rule for each active day:
 
 This is conservative and matches the legacy `每 4 小时：同步 subagent 记忆` expectation without introducing cross-day offset state.
 
+When `complete-overdue` processes multiple overdue hourly occurrences for the same task on the same day and that task has a `special_handler`, Chronos now runs the handler once for that task/day batch, then marks every overdue occurrence completed with `completion_mode=fallback_handler_merged` and a per-occurrence `special_handler_result` trail (`merge_key`, merged index/count, source occurrence).
+
 ## Legacy migration policy
 
 Phase 2+ adds `scripts/migrate_legacy_entries.py` for conservative migration out of `entries`.

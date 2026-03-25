@@ -385,7 +385,8 @@ def get_overdue_periodic_tasks(now: datetime | None = None) -> list[dict]:
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT o.id, t.id, t.name, COALESCE(o.scheduled_time, t.time_of_day), o.status, t.special_handler, t.handler_payload
+        SELECT o.id, t.id, t.name, o.date, t.cycle_type,
+               COALESCE(o.scheduled_time, t.time_of_day), o.status, t.special_handler, t.handler_payload
         FROM periodic_occurrences o
         JOIN periodic_tasks t ON o.task_id = t.id
         WHERE o.date = ?
@@ -403,12 +404,14 @@ def get_overdue_periodic_tasks(now: datetime | None = None) -> list[dict]:
             'occurrence_id': occ_id,
             'task_id': task_id,
             'name': name,
+            'date': occ_date,
+            'cycle_type': cycle_type,
             'time_of_day': scheduled_time,
             'status': status,
             'special_handler': special_handler,
             'handler_payload': handler_payload,
         }
-        for occ_id, task_id, name, scheduled_time, status, special_handler, handler_payload in cur.fetchall()
+        for occ_id, task_id, name, occ_date, cycle_type, scheduled_time, status, special_handler, handler_payload in cur.fetchall()
     ]
     conn.close()
     return rows
@@ -557,6 +560,28 @@ def run_special_handler(handler_name: str | None, handler_payload: str | None, t
     return False, f"❌ 不支持的 special_handler: {handler_name}"
 
 
+def build_merged_special_handler_result(
+    base_result: str,
+    *,
+    identifier: str,
+    name: str,
+    scheduled_time: str | None,
+    occurrence_date: str | None,
+    merge_key: str,
+    merged_count: int,
+    merged_index: int,
+) -> str:
+    schedule_label = scheduled_time or '无时间'
+    date_label = occurrence_date or '未知日期'
+    merge_suffix = (
+        f" [merged occurrence {merged_index}/{merged_count}; merge_key={merge_key}; "
+        f"source={identifier} {name} @ {date_label} {schedule_label}]"
+    )
+    if merge_suffix in base_result:
+        return base_result
+    return f"{base_result}{merge_suffix}"
+
+
 def complete_periodic_occurrence(occ_id: int, *, completion_mode: str = 'manual', special_handler_result: str | None = None) -> tuple[bool, str]:
     conn = sqlite3.connect(str(TODO_DB))
     try:
@@ -633,26 +658,90 @@ def complete_overdue_tasks(now: datetime | None = None, dry_run: bool = False) -
     simulated: list[str] = []
     errors: list[str] = []
     handled = []
+    special_handler_cache: dict[tuple[str, int, str], tuple[bool, str]] = {}
 
     for task in periodic:
         handled.append(task['identifier'])
+        merge_key = None
+        if task.get('special_handler') and task.get('cycle_type') == 'hourly' and task.get('date'):
+            merge_key = (task['special_handler'], task['task_id'], task['date'])
         if dry_run:
             label = f"{task['identifier']} {task['name']} @ {task['time_of_day']}"
             if task.get('special_handler'):
                 label += f" [{task['special_handler']}]"
+                if merge_key:
+                    merged_total = sum(
+                        1
+                        for candidate in periodic
+                        if candidate.get('special_handler') == task.get('special_handler')
+                        and candidate.get('cycle_type') == 'hourly'
+                        and candidate.get('task_id') == task.get('task_id')
+                        and candidate.get('date') == task.get('date')
+                    )
+                    if merged_total > 1:
+                        label += f" [merge-once day-batch x{merged_total}]"
             simulated.append(label)
             continue
 
         completion_mode = 'manual'
         special_result = None
         if task.get('special_handler'):
-            ok, message = run_special_handler(task.get('special_handler'), task.get('handler_payload'), task['name'], now=now)
-            if not ok:
-                errors.append(message)
-                continue
-            special_result = message
-            completion_mode = 'fallback_handler'
-            completed.append(f"📝 {message}")
+            if merge_key:
+                cached = special_handler_cache.get(merge_key)
+                if cached is None:
+                    cached = run_special_handler(task.get('special_handler'), task.get('handler_payload'), task['name'], now=now)
+                    special_handler_cache[merge_key] = cached
+                    if cached[0]:
+                        merged_total = sum(
+                            1
+                            for candidate in periodic
+                            if candidate.get('special_handler') == task.get('special_handler')
+                            and candidate.get('cycle_type') == 'hourly'
+                            and candidate.get('task_id') == task.get('task_id')
+                            and candidate.get('date') == task.get('date')
+                        )
+                        if merged_total > 1:
+                            completed.append(
+                                f"📝 {cached[1]} [hourly merge-once applied for task_id={task['task_id']} date={task['date']} occurrences={merged_total}]"
+                            )
+                        else:
+                            completed.append(f"📝 {cached[1]}")
+                ok, message = cached
+                if not ok:
+                    errors.append(message)
+                    continue
+                merged_tasks = [
+                    candidate for candidate in periodic
+                    if candidate.get('special_handler') == task.get('special_handler')
+                    and candidate.get('cycle_type') == 'hourly'
+                    and candidate.get('task_id') == task.get('task_id')
+                    and candidate.get('date') == task.get('date')
+                ]
+                merged_total = len(merged_tasks)
+                merged_index = next(
+                    (index for index, candidate in enumerate(merged_tasks, start=1) if candidate['occurrence_id'] == task['occurrence_id']),
+                    1,
+                )
+                merge_key_label = f"{task['special_handler']}:{task['task_id']}:{task['date']}"
+                special_result = build_merged_special_handler_result(
+                    message,
+                    identifier=task['identifier'],
+                    name=task['name'],
+                    scheduled_time=task.get('time_of_day'),
+                    occurrence_date=task.get('date'),
+                    merge_key=merge_key_label,
+                    merged_count=merged_total,
+                    merged_index=merged_index,
+                )
+                completion_mode = 'fallback_handler_merged'
+            else:
+                ok, message = run_special_handler(task.get('special_handler'), task.get('handler_payload'), task['name'], now=now)
+                if not ok:
+                    errors.append(message)
+                    continue
+                special_result = message
+                completion_mode = 'fallback_handler'
+                completed.append(f"📝 {message}")
 
         ok, message = complete_periodic_occurrence(task['occurrence_id'], completion_mode=completion_mode, special_handler_result=special_result)
         if ok:

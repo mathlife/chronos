@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Removed previously tracked Python cache artifacts from git history going forward.
 - Eliminated changelog duplication and aligned the current hardening notes with real behavior.
+- `complete-overdue` now merges same-day overdue hourly special-handler batches per task so one handler run can complete multiple overdue occurrences while preserving per-occurrence merge trace metadata.
 
 ## [1.0.0] - 2026-03-16
 
