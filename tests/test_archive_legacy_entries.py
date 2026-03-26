@@ -117,6 +117,37 @@ class LegacyArchiveScriptTests(unittest.TestCase):
         self.assertEqual(by_id[6].action, 'already_archived')
         self.assertEqual(by_id[7].action, 'already_archived')
 
+    def test_resolve_archive_status_preserves_current_status_when_archived_not_allowed(self):
+        conn = archive_module.connect(str(self.db_path))
+        try:
+            resolved = archive_module.resolve_archive_status(conn, 'pending')
+        finally:
+            conn.close()
+
+        self.assertEqual(resolved, 'archived')
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            constrained_db = Path(temp_dir) / 'todo.db'
+            conn = sqlite3.connect(constrained_db)
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE entries (
+                        id INTEGER PRIMARY KEY,
+                        text TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK (status IN ('pending','done','skipped')),
+                        group_id INTEGER NOT NULL,
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+                constrained = archive_module.resolve_archive_status(conn, 'pending')
+            finally:
+                conn.close()
+
+        self.assertEqual(constrained, 'pending')
+
     def test_summary_json_shape(self):
         summary = archive_module.summarize(
             [archive_module.ArchivePlan(1, 'x', 'pending', 2, 'task', 'legacy_entries_migrated', 'archive', 'reason')],

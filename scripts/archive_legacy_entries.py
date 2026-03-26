@@ -70,6 +70,34 @@ def get_entry_columns(conn: sqlite3.Connection) -> set[str]:
     return {row[1] for row in conn.execute('PRAGMA table_info(entries)').fetchall()}
 
 
+def get_allowed_entry_statuses(conn: sqlite3.Connection) -> set[str] | None:
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='entries'").fetchone()
+    if not row or not row[0]:
+        return None
+    sql = str(row[0])
+    marker = "CHECK (status IN ("
+    start = sql.find(marker)
+    if start == -1:
+        return None
+    end = sql.find('))', start)
+    if end == -1:
+        return None
+    raw_values = sql[start + len(marker):end]
+    values = []
+    for chunk in raw_values.split(','):
+        chunk = chunk.strip()
+        if len(chunk) >= 2 and chunk[0] == chunk[-1] == "'":
+            values.append(chunk[1:-1])
+    return set(values) or None
+
+
+def resolve_archive_status(conn: sqlite3.Connection, current_status: str) -> str:
+    allowed = get_allowed_entry_statuses(conn)
+    if not allowed or ARCHIVE_STATUS in allowed:
+        return ARCHIVE_STATUS
+    return current_status
+
+
 def ensure_archive_columns(conn: sqlite3.Connection) -> None:
     columns = get_entry_columns(conn)
     for name, statement in ENTRY_ARCHIVE_COLUMNS.items():
@@ -161,6 +189,7 @@ def build_archive_reason(task_id: int, task_name: str, task_source: str) -> str:
 def apply_plan(conn: sqlite3.Connection, plan: ArchivePlan, archived_at: str) -> AppliedResult:
     previous_status = plan.archived_from_status or plan.entry_status
     reason = build_archive_reason(plan.task_id, plan.task_name, plan.task_source)
+    target_status = resolve_archive_status(conn, previous_status)
     conn.execute(
         """
         UPDATE entries
@@ -173,12 +202,13 @@ def apply_plan(conn: sqlite3.Connection, plan: ArchivePlan, archived_at: str) ->
             chronos_linked_task_id = ?
         WHERE id = ?
         """,
-        (ARCHIVE_STATUS, archived_at, reason, previous_status, plan.task_id, plan.entry_id),
+        (target_status, archived_at, reason, previous_status, plan.task_id, plan.entry_id),
     )
+    status_note = '' if target_status == ARCHIVE_STATUS else f' (status preserved as {target_status})'
     return AppliedResult(
         entry_id=plan.entry_id,
         task_id=plan.task_id,
-        note=f"archived legacy entry {plan.entry_id} -> task {plan.task_id} ({plan.task_name})",
+        note=f"archived legacy entry {plan.entry_id} -> task {plan.task_id} ({plan.task_name}){status_note}",
     )
 
 
