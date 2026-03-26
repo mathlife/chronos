@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Phase-2 docs now document the conservative migration policy, including `legacy_entry_id` / `source` traceability and the deliberate refusal to auto-migrate unsupported cadences such as `每 4 小时 ...`.
 - Legacy archive handling now treats `entries.status='archived'` as the preferred first-class archive state when the schema allows it, while still honoring `chronos_archived_*` metadata as a backward-compatible fallback for constrained old schemas.
 - `todo.py` now treats archived migrated legacy rows as readonly compatibility records: live list/snapshot flows ignore them, `show` exposes the archive trail, and direct `complete` / `skip` fail closed.
+- Extracted shared `core/legacy_archive.py` so archive/readonly semantics, SQL projection helpers, and operator-facing messages are defined once and reused by both `archive_legacy_entries.py` and `todo.py`.
 
 ### Fixed
 - Removed previously tracked Python cache artifacts from git history going forward.

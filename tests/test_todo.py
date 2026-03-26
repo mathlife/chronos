@@ -339,6 +339,33 @@ class TodoOverdueCompletionTests(unittest.TestCase):
         self.assertIn('Chronos：legacy 归档', show_output)
         self.assertIn('归档时间：2026-03-25T16:50:00', show_output)
 
+    def test_archived_from_status_only_entry_is_treated_as_archived(self):
+        conn = self._connect()
+        conn.execute("ALTER TABLE entries ADD COLUMN chronos_readonly INTEGER NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE entries ADD COLUMN chronos_archived_at TEXT")
+        conn.execute("ALTER TABLE entries ADD COLUMN chronos_archive_reason TEXT")
+        conn.execute("ALTER TABLE entries ADD COLUMN chronos_archived_from_status TEXT")
+        conn.execute("ALTER TABLE entries ADD COLUMN chronos_linked_task_id INTEGER")
+        conn.execute(
+            "UPDATE entries SET status = 'pending', chronos_archived_from_status = 'pending', chronos_linked_task_id = 2 WHERE id = 16"
+        )
+        conn.commit()
+        conn.close()
+
+        with patch.object(todo_module, 'TODO_DB', self.db_path):
+            ok_complete, message_complete = todo_module.complete_legacy_entry(16)
+        self.assertFalse(ok_complete)
+        self.assertIn('legacy 归档记录', message_complete)
+        self.assertIn('关联周期任务 2', message_complete)
+
+        with patch.object(todo_module, 'TODO_DB', self.db_path):
+            show_buf = io.StringIO()
+            with redirect_stdout(show_buf):
+                todo_module.cmd_show('ID16')
+        show_output = show_buf.getvalue()
+        self.assertIn('状态：pending', show_output)
+        self.assertIn('Chronos：legacy 归档', show_output)
+
     def test_complete_overdue_tasks_runs_special_handler_from_periodic_metadata(self):
         pending_subagents = json.dumps([
             {'session_id': 'agent:main:subagent:abc', 'status': 'completed', 'handled_at': None}

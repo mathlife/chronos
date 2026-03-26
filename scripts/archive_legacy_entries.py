@@ -14,19 +14,25 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-ARCHIVE_STATUS = 'archived'
-ARCHIVE_NOTE_PREFIX = 'Chronos legacy archive:'
-ENTRY_ARCHIVE_COLUMNS = {
-    'chronos_readonly': "ALTER TABLE entries ADD COLUMN chronos_readonly INTEGER NOT NULL DEFAULT 0",
-    'chronos_archived_at': "ALTER TABLE entries ADD COLUMN chronos_archived_at TEXT",
-    'chronos_archive_reason': "ALTER TABLE entries ADD COLUMN chronos_archive_reason TEXT",
-    'chronos_archived_from_status': "ALTER TABLE entries ADD COLUMN chronos_archived_from_status TEXT",
-    'chronos_linked_task_id': "ALTER TABLE entries ADD COLUMN chronos_linked_task_id INTEGER",
-}
+SKILL_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SKILL_DIR))
+
+from core.legacy_archive import (
+    ARCHIVE_NOTE_PREFIX,
+    ARCHIVE_STATUS,
+    build_entry_archive_state,
+    ensure_archive_columns,
+    get_allowed_entry_statuses,
+    get_entry_columns,
+    legacy_archive_select_expressions,
+    resolve_archive_status,
+)
 
 
 @dataclass
@@ -66,60 +72,18 @@ def connect(db_path: str) -> sqlite3.Connection:
     return conn
 
 
-def get_entry_columns(conn: sqlite3.Connection) -> set[str]:
-    return {row[1] for row in conn.execute('PRAGMA table_info(entries)').fetchall()}
-
-
-def get_allowed_entry_statuses(conn: sqlite3.Connection) -> set[str] | None:
-    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='entries'").fetchone()
-    if not row or not row[0]:
-        return None
-    sql = str(row[0])
-    marker = "CHECK (status IN ("
-    start = sql.find(marker)
-    if start == -1:
-        return None
-    end = sql.find('))', start)
-    if end == -1:
-        return None
-    raw_values = sql[start + len(marker):end]
-    values = []
-    for chunk in raw_values.split(','):
-        chunk = chunk.strip()
-        if len(chunk) >= 2 and chunk[0] == chunk[-1] == "'":
-            values.append(chunk[1:-1])
-    return set(values) or None
-
-
-def resolve_archive_status(conn: sqlite3.Connection, current_status: str) -> str:
-    allowed = get_allowed_entry_statuses(conn)
-    if not allowed or ARCHIVE_STATUS in allowed:
-        return ARCHIVE_STATUS
-    return current_status
-
-
-def ensure_archive_columns(conn: sqlite3.Connection) -> None:
-    columns = get_entry_columns(conn)
-    for name, statement in ENTRY_ARCHIVE_COLUMNS.items():
-        if name not in columns:
-            conn.execute(statement)
-    conn.commit()
-
-
 def select_linked_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     columns = get_entry_columns(conn)
-    readonly_sql = 'COALESCE(e.chronos_readonly, 0) AS chronos_readonly' if 'chronos_readonly' in columns else '0 AS chronos_readonly'
-    archived_at_sql = 'e.chronos_archived_at AS chronos_archived_at' if 'chronos_archived_at' in columns else 'NULL AS chronos_archived_at'
-    archived_from_sql = 'e.chronos_archived_from_status AS chronos_archived_from_status' if 'chronos_archived_from_status' in columns else 'NULL AS chronos_archived_from_status'
-    linked_task_sql = 'e.chronos_linked_task_id AS chronos_linked_task_id' if 'chronos_linked_task_id' in columns else 'NULL AS chronos_linked_task_id'
+    expressions = legacy_archive_select_expressions(columns, table_alias='e')
 
     query = f"""
         SELECT e.id, e.text, e.status,
                t.id AS task_id, t.name AS task_name, COALESCE(t.source, 'chronos') AS task_source,
-               {readonly_sql},
-               {archived_at_sql},
-               {archived_from_sql},
-               {linked_task_sql}
+               {expressions['chronos_readonly']} AS chronos_readonly,
+               {expressions['chronos_archived_at']} AS chronos_archived_at,
+               {expressions['chronos_archived_from_status']} AS chronos_archived_from_status,
+               {expressions['chronos_linked_task_id']} AS chronos_linked_task_id,
+               {expressions['chronos_archive_reason']} AS chronos_archive_reason
         FROM entries e
         JOIN periodic_tasks t ON t.legacy_entry_id = e.id
         ORDER BY e.id, t.id
@@ -128,12 +92,13 @@ def select_linked_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def classify_row(row: sqlite3.Row) -> ArchivePlan:
-    status = row['status']
-    readonly = int(row['chronos_readonly'] or 0)
-    archived_at = row['chronos_archived_at']
-    archived_from_status = row['chronos_archived_from_status']
-    linked_task_id = row['chronos_linked_task_id']
-    has_archive_state = bool(status == ARCHIVE_STATUS or archived_at or archived_from_status)
+    state = build_entry_archive_state(dict(row))
+    status = state['status']
+    readonly = state['chronos_readonly']
+    archived_at = state['chronos_archived_at']
+    archived_from_status = state['chronos_archived_from_status']
+    linked_task_id = state['chronos_linked_task_id']
+    has_archive_state = state['is_archived']
 
     if has_archive_state and readonly == 1:
         return ArchivePlan(

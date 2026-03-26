@@ -157,7 +157,7 @@ class LegacyArchiveScriptTests(unittest.TestCase):
             )
             conn.commit()
             row = conn.execute(
-                "SELECT e.id, e.text, e.status, t.id AS task_id, t.name AS task_name, COALESCE(t.source, 'chronos') AS task_source, COALESCE(e.chronos_readonly, 0) AS chronos_readonly, e.chronos_archived_at AS chronos_archived_at, e.chronos_archived_from_status AS chronos_archived_from_status, e.chronos_linked_task_id AS chronos_linked_task_id FROM entries e JOIN periodic_tasks t ON t.legacy_entry_id = e.id WHERE e.id = 6"
+                "SELECT e.id, e.text, e.status, t.id AS task_id, t.name AS task_name, COALESCE(t.source, 'chronos') AS task_source, COALESCE(e.chronos_readonly, 0) AS chronos_readonly, e.chronos_archived_at AS chronos_archived_at, e.chronos_archived_from_status AS chronos_archived_from_status, e.chronos_linked_task_id AS chronos_linked_task_id, e.chronos_archive_reason AS chronos_archive_reason FROM entries e JOIN periodic_tasks t ON t.legacy_entry_id = e.id WHERE e.id = 6"
             ).fetchone()
             plan = archive_module.classify_row(row)
         finally:

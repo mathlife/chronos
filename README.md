@@ -113,7 +113,7 @@ What it does:
 
 Operational boundary:
 - canonical live scheduling state remains `periodic_tasks` + `periodic_occurrences`
-- legacy `entries` archive state is now interpreted as `status='archived'` first, metadata second
+- legacy `entries` archive state is now interpreted by shared helper semantics: `status='archived'` first, then `chronos_archived_at` / `chronos_archive_reason` / `chronos_archived_from_status`
 - Chronos does not attempt a broad live-table migration of arbitrary `entries.status` constraints; if a deployment still forbids `archived`, the archive script preserves the prior status and relies on `chronos_archived_*` metadata instead
 
 Operational effect:

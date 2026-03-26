@@ -17,6 +17,13 @@ from pathlib import Path
 SKILL_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL_DIR))
 
+from core.legacy_archive import (
+    archive_block_message,
+    archive_display_label,
+    build_entry_archive_state,
+    get_entry_columns,
+    legacy_archive_select_expressions,
+)
 from core.paths import OPENCLAW_BIN, PYTHON_BIN, SCRIPTS_DIR, TODO_DB, WORKSPACE
 from core.models import ALLOWED_CYCLE_TYPES
 
@@ -658,37 +665,18 @@ def complete_periodic_occurrence(occ_id: int, *, completion_mode: str = 'manual'
     return True, f"✅ 已完成 FIN-{occ_id}（任务ID {task_id}）"
 
 
-def is_archived_entry_state(state: dict) -> bool:
-    return bool(
-        state.get('status') == 'archived'
-        or state.get('chronos_archived_at')
-        or state.get('chronos_archive_reason')
-    )
-
-
-
 def get_entry_archive_state(cur: sqlite3.Cursor, entry_id: int) -> dict | None:
-    columns = {row[1] for row in cur.execute("PRAGMA table_info(entries)").fetchall()}
-    readonly_expr = 'COALESCE(chronos_readonly, 0)' if 'chronos_readonly' in columns else '0'
-    archived_at_expr = 'chronos_archived_at' if 'chronos_archived_at' in columns else 'NULL'
-    linked_task_expr = 'chronos_linked_task_id' if 'chronos_linked_task_id' in columns else 'NULL'
-    archive_reason_expr = 'chronos_archive_reason' if 'chronos_archive_reason' in columns else 'NULL'
+    columns = get_entry_columns(cur.connection)
+    expressions = legacy_archive_select_expressions(columns)
     cur.execute(
-        f"SELECT status, {readonly_expr}, {archived_at_expr}, {linked_task_expr}, {archive_reason_expr} FROM entries WHERE id = ?",
+        f"SELECT status, {expressions['chronos_readonly']} AS chronos_readonly, {expressions['chronos_archived_at']} AS chronos_archived_at, {expressions['chronos_archived_from_status']} AS chronos_archived_from_status, {expressions['chronos_linked_task_id']} AS chronos_linked_task_id, {expressions['chronos_archive_reason']} AS chronos_archive_reason FROM entries WHERE id = ?",
         (entry_id,),
     )
     row = cur.fetchone()
     if not row:
         return None
-    state = {
-        'status': row[0],
-        'chronos_readonly': int(row[1] or 0),
-        'chronos_archived_at': row[2],
-        'chronos_linked_task_id': row[3],
-        'chronos_archive_reason': row[4],
-    }
-    state['is_archived'] = is_archived_entry_state(state)
-    return state
+    data = {description[0]: row[index] for index, description in enumerate(cur.description)}
+    return build_entry_archive_state(data)
 
 
 def complete_legacy_entry(entry_id: int) -> tuple[bool, str]:
@@ -701,9 +689,7 @@ def complete_legacy_entry(entry_id: int) -> tuple[bool, str]:
 
         current_status = state['status']
         if state['is_archived']:
-            task_hint = f"，请改为操作关联周期任务 {state['chronos_linked_task_id']}" if state['chronos_linked_task_id'] else ''
-            archive_hint = '（只读）' if state['chronos_readonly'] else ''
-            return False, f"❌ ID {entry_id} 是 legacy 归档记录{archive_hint}{task_hint}"
+            return False, archive_block_message(entry_id, state)
         if current_status == 'skipped':
             return False, f"❌ 无法完成已跳过的任务 ID {entry_id}"
         if current_status == 'done':
@@ -1038,9 +1024,7 @@ def cmd_skip(identifier):
 
             current_status = state['status']
             if state['is_archived']:
-                task_hint = f"，请改为操作关联周期任务 {state['chronos_linked_task_id']}" if state['chronos_linked_task_id'] else ''
-                archive_hint = '（只读）' if state['chronos_readonly'] else ''
-                print(f"❌ ID {entry_id} 是 legacy 归档记录{archive_hint}{task_hint}")
+                print(archive_block_message(entry_id, state))
                 conn.close()
                 return
             if current_status == 'skipped':
@@ -1090,18 +1074,16 @@ def cmd_show(identifier):
         entry_id = parse_entry_identifier(identifier)
         conn = sqlite3.connect(str(TODO_DB))
         cur = conn.cursor()
-        columns = {row[1] for row in cur.execute("PRAGMA table_info(entries)").fetchall()}
-        readonly_expr = 'COALESCE(e.chronos_readonly, 0)' if 'chronos_readonly' in columns else '0'
-        archived_at_expr = 'e.chronos_archived_at' if 'chronos_archived_at' in columns else 'NULL'
-        linked_task_expr = 'e.chronos_linked_task_id' if 'chronos_linked_task_id' in columns else 'NULL'
-        archive_reason_expr = 'e.chronos_archive_reason' if 'chronos_archive_reason' in columns else 'NULL'
+        columns = get_entry_columns(conn)
+        expressions = legacy_archive_select_expressions(columns, table_alias='e')
         cur.execute(
             f"""
             SELECT e.text, e.status, g.name as group_name,
-                   {readonly_expr} AS chronos_readonly,
-                   {archived_at_expr} AS chronos_archived_at,
-                   {linked_task_expr} AS chronos_linked_task_id,
-                   {archive_reason_expr} AS chronos_archive_reason
+                   {expressions['chronos_readonly']} AS chronos_readonly,
+                   {expressions['chronos_archived_at']} AS chronos_archived_at,
+                   {expressions['chronos_archived_from_status']} AS chronos_archived_from_status,
+                   {expressions['chronos_linked_task_id']} AS chronos_linked_task_id,
+                   {expressions['chronos_archive_reason']} AS chronos_archive_reason
             FROM entries e
             LEFT JOIN groups g ON e.group_id = g.id
             WHERE e.id = ?
@@ -1111,17 +1093,24 @@ def cmd_show(identifier):
         row = cur.fetchone()
         conn.close()
         if row:
-            text, status, group_name, chronos_readonly, chronos_archived_at, chronos_linked_task_id, chronos_archive_reason = row
+            text, status, group_name, chronos_readonly, chronos_archived_at, chronos_archived_from_status, chronos_linked_task_id, chronos_archive_reason = row
             group = group_name or 'Inbox'
+            state = build_entry_archive_state({
+                'status': status,
+                'chronos_readonly': chronos_readonly,
+                'chronos_archived_at': chronos_archived_at,
+                'chronos_archived_from_status': chronos_archived_from_status,
+                'chronos_linked_task_id': chronos_linked_task_id,
+                'chronos_archive_reason': chronos_archive_reason,
+            })
             print(f"【任务】{text}")
             print(f"分组：{group}")
             print(f"状态：{status}")
-            if status == 'archived' or chronos_archived_at or chronos_archive_reason:
-                archive_label = 'Chronos：legacy 归档（只读）' if chronos_readonly else 'Chronos：legacy 归档'
-                print(archive_label)
-                print(f"关联周期任务：{chronos_linked_task_id or '无'}")
-                print(f"归档时间：{chronos_archived_at or '无'}")
-                print(f"归档原因：{chronos_archive_reason or '无'}")
+            if state['is_archived']:
+                print(archive_display_label(state))
+                print(f"关联周期任务：{state['chronos_linked_task_id'] or '无'}")
+                print(f"归档时间：{state['chronos_archived_at'] or '无'}")
+                print(f"归档原因：{state['chronos_archive_reason'] or '无'}")
         else:
             print(f"❌ 未找到 ID {entry_id}")
 
