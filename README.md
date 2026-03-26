@@ -105,9 +105,16 @@ What it does:
   - `chronos_archive_reason`
   - `chronos_archived_from_status`
   - `chronos_linked_task_id`
-- marks linked legacy rows `status='archived'` + `chronos_readonly=1`
+- prefers `status='archived'` as the first-class archive marker when the live `entries` schema allows it
+- still treats archive metadata as the compatibility fallback if an older constrained `entries.status` enum cannot store `archived`
+- repairs partially archived rows by completing missing readonly/archive metadata
 - keeps the original row in place for audit / traceability
 - keeps active Chronos surfaces clean because linked rows are already excluded from live list/snapshot/overdue queries
+
+Operational boundary:
+- canonical live scheduling state remains `periodic_tasks` + `periodic_occurrences`
+- legacy `entries` archive state is now interpreted as `status='archived'` first, metadata second
+- Chronos does not attempt a broad live-table migration of arbitrary `entries.status` constraints; if a deployment still forbids `archived`, the archive script preserves the prior status and relies on `chronos_archived_*` metadata instead
 
 Operational effect:
 - migrated legacy rows stop looking like live legacy tasks

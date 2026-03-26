@@ -658,6 +658,15 @@ def complete_periodic_occurrence(occ_id: int, *, completion_mode: str = 'manual'
     return True, f"✅ 已完成 FIN-{occ_id}（任务ID {task_id}）"
 
 
+def is_archived_entry_state(state: dict) -> bool:
+    return bool(
+        state.get('status') == 'archived'
+        or state.get('chronos_archived_at')
+        or state.get('chronos_archive_reason')
+    )
+
+
+
 def get_entry_archive_state(cur: sqlite3.Cursor, entry_id: int) -> dict | None:
     columns = {row[1] for row in cur.execute("PRAGMA table_info(entries)").fetchall()}
     readonly_expr = 'COALESCE(chronos_readonly, 0)' if 'chronos_readonly' in columns else '0'
@@ -671,13 +680,15 @@ def get_entry_archive_state(cur: sqlite3.Cursor, entry_id: int) -> dict | None:
     row = cur.fetchone()
     if not row:
         return None
-    return {
+    state = {
         'status': row[0],
         'chronos_readonly': int(row[1] or 0),
         'chronos_archived_at': row[2],
         'chronos_linked_task_id': row[3],
         'chronos_archive_reason': row[4],
     }
+    state['is_archived'] = is_archived_entry_state(state)
+    return state
 
 
 def complete_legacy_entry(entry_id: int) -> tuple[bool, str]:
@@ -689,9 +700,10 @@ def complete_legacy_entry(entry_id: int) -> tuple[bool, str]:
             return False, f"❌ 未找到 ID {entry_id}"
 
         current_status = state['status']
-        if state['chronos_readonly']:
+        if state['is_archived']:
             task_hint = f"，请改为操作关联周期任务 {state['chronos_linked_task_id']}" if state['chronos_linked_task_id'] else ''
-            return False, f"❌ ID {entry_id} 是只读 legacy 归档记录{task_hint}"
+            archive_hint = '（只读）' if state['chronos_readonly'] else ''
+            return False, f"❌ ID {entry_id} 是 legacy 归档记录{archive_hint}{task_hint}"
         if current_status == 'skipped':
             return False, f"❌ 无法完成已跳过的任务 ID {entry_id}"
         if current_status == 'done':
@@ -1025,9 +1037,10 @@ def cmd_skip(identifier):
                 return
 
             current_status = state['status']
-            if state['chronos_readonly']:
+            if state['is_archived']:
                 task_hint = f"，请改为操作关联周期任务 {state['chronos_linked_task_id']}" if state['chronos_linked_task_id'] else ''
-                print(f"❌ ID {entry_id} 是只读 legacy 归档记录{task_hint}")
+                archive_hint = '（只读）' if state['chronos_readonly'] else ''
+                print(f"❌ ID {entry_id} 是 legacy 归档记录{archive_hint}{task_hint}")
                 conn.close()
                 return
             if current_status == 'skipped':
@@ -1103,8 +1116,9 @@ def cmd_show(identifier):
             print(f"【任务】{text}")
             print(f"分组：{group}")
             print(f"状态：{status}")
-            if chronos_readonly:
-                print("Chronos：legacy 归档（只读）")
+            if status == 'archived' or chronos_archived_at or chronos_archive_reason:
+                archive_label = 'Chronos：legacy 归档（只读）' if chronos_readonly else 'Chronos：legacy 归档'
+                print(archive_label)
                 print(f"关联周期任务：{chronos_linked_task_id or '无'}")
                 print(f"归档时间：{chronos_archived_at or '无'}")
                 print(f"归档原因：{chronos_archive_reason or '无'}")

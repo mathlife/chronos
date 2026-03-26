@@ -133,8 +133,9 @@ def classify_row(row: sqlite3.Row) -> ArchivePlan:
     archived_at = row['chronos_archived_at']
     archived_from_status = row['chronos_archived_from_status']
     linked_task_id = row['chronos_linked_task_id']
+    has_archive_state = bool(status == ARCHIVE_STATUS or archived_at or archived_from_status)
 
-    if status == ARCHIVE_STATUS and readonly == 1:
+    if has_archive_state and readonly == 1:
         return ArchivePlan(
             entry_id=row['id'],
             text=row['text'],
@@ -143,14 +144,14 @@ def classify_row(row: sqlite3.Row) -> ArchivePlan:
             task_name=row['task_name'],
             task_source=row['task_source'],
             action='already_archived',
-            reason='legacy row is already archived and readonly',
+            reason='legacy row already has archived state and readonly metadata',
             readonly=readonly,
             archived_at=archived_at,
             archived_from_status=archived_from_status,
             linked_task_id=linked_task_id,
         )
 
-    if status == ARCHIVE_STATUS and readonly != 1:
+    if has_archive_state and readonly != 1:
         return ArchivePlan(
             entry_id=row['id'],
             text=row['text'],
@@ -159,7 +160,7 @@ def classify_row(row: sqlite3.Row) -> ArchivePlan:
             task_name=row['task_name'],
             task_source=row['task_source'],
             action='repair_archive_metadata',
-            reason='status is archived but readonly metadata is incomplete',
+            reason='legacy row has archived state but readonly metadata is incomplete',
             readonly=readonly,
             archived_at=archived_at,
             archived_from_status=archived_from_status,

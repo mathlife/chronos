@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reminder cron creation/removal now goes through a shared helper instead of duplicating argv construction.
 - README verification steps now include config diagnostics, schema preflight, full test discovery, legacy cron dry-run cleanup, legacy archive dry-run/apply, and git hygiene checks.
 - Phase-2 docs now document the conservative migration policy, including `legacy_entry_id` / `source` traceability and the deliberate refusal to auto-migrate unsupported cadences such as `每 4 小时 ...`.
+- Legacy archive handling now treats `entries.status='archived'` as the preferred first-class archive state when the schema allows it, while still honoring `chronos_archived_*` metadata as a backward-compatible fallback for constrained old schemas.
 - `todo.py` now treats archived migrated legacy rows as readonly compatibility records: live list/snapshot flows ignore them, `show` exposes the archive trail, and direct `complete` / `skip` fail closed.
 
 ### Fixed

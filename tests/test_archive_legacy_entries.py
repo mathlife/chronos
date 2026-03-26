@@ -148,6 +148,24 @@ class LegacyArchiveScriptTests(unittest.TestCase):
 
         self.assertEqual(constrained, 'pending')
 
+    def test_classify_metadata_only_archive_as_archived_state(self):
+        conn = archive_module.connect(str(self.db_path))
+        try:
+            archive_module.ensure_archive_columns(conn)
+            conn.execute(
+                "UPDATE entries SET status = 'pending', chronos_archived_at = '2026-03-25T16:50:00', chronos_archived_from_status = 'pending', chronos_linked_task_id = 13 WHERE id = 6"
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT e.id, e.text, e.status, t.id AS task_id, t.name AS task_name, COALESCE(t.source, 'chronos') AS task_source, COALESCE(e.chronos_readonly, 0) AS chronos_readonly, e.chronos_archived_at AS chronos_archived_at, e.chronos_archived_from_status AS chronos_archived_from_status, e.chronos_linked_task_id AS chronos_linked_task_id FROM entries e JOIN periodic_tasks t ON t.legacy_entry_id = e.id WHERE e.id = 6"
+            ).fetchone()
+            plan = archive_module.classify_row(row)
+        finally:
+            conn.close()
+
+        self.assertEqual(plan.action, 'repair_archive_metadata')
+        self.assertIn('archived state', plan.reason)
+
     def test_summary_json_shape(self):
         summary = archive_module.summarize(
             [archive_module.ArchivePlan(1, 'x', 'pending', 2, 'task', 'legacy_entries_migrated', 'archive', 'reason')],
