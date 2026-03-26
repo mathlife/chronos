@@ -38,6 +38,8 @@ python3 skills/chronos/scripts/migrate_legacy_entries.py --db /home/ubuntu/.open
 python3 skills/chronos/scripts/migrate_legacy_entries.py --db /home/ubuntu/.openclaw/workspace/todo.db --apply
 python3 skills/chronos/scripts/archive_legacy_entries.py --db /home/ubuntu/.openclaw/workspace/todo.db
 python3 skills/chronos/scripts/archive_legacy_entries.py --db /home/ubuntu/.openclaw/workspace/todo.db --apply
+python3 skills/chronos/scripts/normalize_historical_residues.py --db /home/ubuntu/.openclaw/workspace/todo.db
+python3 skills/chronos/scripts/normalize_historical_residues.py --db /home/ubuntu/.openclaw/workspace/todo.db --apply
 python3 skills/chronos/scripts/todo.py complete-overdue --dry-run
 python3 skills/chronos/scripts/schema_preflight.py
 ```
@@ -117,3 +119,20 @@ Recommended sequence:
 2. `python3 skills/chronos/scripts/migrate_legacy_entries.py --db /path/to/todo.db --apply`
 3. `python3 skills/chronos/scripts/archive_legacy_entries.py --db /path/to/todo.db`
 4. `python3 skills/chronos/scripts/archive_legacy_entries.py --db /path/to/todo.db --apply`
+5. `python3 skills/chronos/scripts/normalize_historical_residues.py --db /path/to/todo.db`
+6. `python3 skills/chronos/scripts/normalize_historical_residues.py --db /path/to/todo.db --apply`
+
+## Historical residue cleanup
+
+`normalize_historical_residues.py` is intentionally narrow. It only touches residues that are already outside normal live semantics:
+
+- orphan `periodic_occurrences` whose `task_id` no longer exists
+- `cycle_type='once'` tasks where `start_date IS NULL` but a single canonical date can be inferred safely
+
+Normalization rules:
+- orphan occurrences are deleted
+- once task with exactly one occurrence date → `start_date = that occurrence date`
+- once task with no occurrence but existing `end_date` → `start_date = end_date`
+- anything else stays untouched for manual review
+
+This keeps cleanup deterministic and avoids changing active recurring behavior.
