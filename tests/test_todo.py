@@ -477,6 +477,23 @@ class TodoOverdueCompletionTests(unittest.TestCase):
         self.assertEqual([row[0] for row in sync_rows], ['pending', 'pending', 'pending'])
         self.assertFalse((self.workspace / 'memory' / '2026-03-25.md').exists())
 
+    def test_complete_overdue_tasks_system_only_limits_scope(self):
+        memory_manager_script = self.workspace / 'scripts' / 'memory_manager.py'
+        memory_manager_script.write_text('# stub', encoding='utf-8')
+
+        with patch.object(todo_module, 'TODO_DB', self.db_path), \
+             patch.object(todo_module, 'WORKSPACE', self.workspace), \
+             patch.object(todo_module, 'subprocess') as mock_subprocess:
+            mock_subprocess.run.return_value = type('Result', (), {'returncode': 0, 'stdout': '[]', 'stderr': ''})()
+            result = todo_module.complete_overdue_tasks(now=datetime(2026, 3, 25, 11, 30), dry_run=True, system_only=True)
+
+        self.assertEqual(result['handled'], ['FIN-303', 'FIN-202', 'FIN-304', 'FIN-305'])
+        self.assertEqual(result['legacy'], [])
+        self.assertEqual(len(result['simulated']), 4)
+        self.assertFalse(any(item.startswith('FIN-101') for item in result['simulated']))
+        self.assertFalse(any(item.startswith('ID16') for item in result['simulated']))
+        self.assertFalse(any(item.startswith('ID17') for item in result['simulated']))
+
     def test_complete_periodic_occurrence_auto_completes_rest_of_month_for_monthly_quota_task(self):
         conn = self._connect()
         conn.execute("INSERT INTO periodic_tasks (id, name, category, cycle_type, n_per_month, time_of_day, count_current_month) VALUES (4, '福建农行秒杀京东卡', 'System', 'monthly_n_times', 1, '09:00', 0)")

@@ -309,6 +309,8 @@ class PeriodicTaskManager:
                     continue
                 if task.cycle_type == 'once' and task.start_date and task.start_date != today.isoformat():
                     continue
+                if getattr(task, 'task_kind', 'scheduled') == 'system':
+                    continue
                 if not job_name:
                     job_name = self.schedule_reminder_cron(task.id, today, schedule_time)
                     if job_name:

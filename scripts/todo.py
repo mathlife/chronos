@@ -15,7 +15,9 @@ from datetime import date, datetime
 from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
+WORKSPACE_ROOT = SKILL_DIR.parent.parent
 sys.path.insert(0, str(SKILL_DIR))
+sys.path.insert(0, str(WORKSPACE_ROOT))
 
 from core.legacy_archive import (
     archive_block_message,
@@ -26,6 +28,7 @@ from core.legacy_archive import (
 )
 from core.paths import OPENCLAW_BIN, PYTHON_BIN, SCRIPTS_DIR, TODO_DB, WORKSPACE
 from core.models import ALLOWED_CYCLE_TYPES
+from scripts.subagent_sync_ledger import looks_like_subagent_session
 
 MANAGER_SCRIPT = SCRIPTS_DIR / 'periodic_task_manager.py'
 CYCLE_TYPES = list(ALLOWED_CYCLE_TYPES)
@@ -133,6 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     complete_overdue_parser = subparsers.add_parser("complete-overdue", help="Complete today's overdue scheduled tasks")
     complete_overdue_parser.add_argument("--dry-run", action="store_true", help="Show what would be completed without changing state")
+    complete_overdue_parser.add_argument("--system-only", action="store_true", help="Only process overdue system tasks and skip regular scheduled/legacy tasks")
     complete_overdue_parser.add_argument("--now", dest="now_override", help="Testing override for current timestamp (YYYY-MM-DDTHH:MM)")
 
     skip_parser = subparsers.add_parser("skip", help="Skip a task")
@@ -383,15 +387,16 @@ def is_meta_review_entry(text: str) -> bool:
     return bool(META_REVIEW_PATTERN.search(text))
 
 
-def get_overdue_periodic_tasks(now: datetime | None = None) -> list[dict]:
+def get_overdue_periodic_tasks(now: datetime | None = None, *, system_only: bool = False) -> list[dict]:
     now = now or datetime.now()
     today = now.date().isoformat()
     current_time = now.strftime('%H:%M')
 
     conn = sqlite3.connect(str(TODO_DB))
     cur = conn.cursor()
+    task_kind_filter = "AND COALESCE(t.task_kind, 'scheduled') = 'system'" if system_only else ""
     cur.execute(
-        """
+        f"""
         SELECT o.id, t.id, t.name, o.date, t.cycle_type,
                COALESCE(o.scheduled_time, t.time_of_day), o.status, t.special_handler, t.handler_payload
         FROM periodic_occurrences o
@@ -401,6 +406,7 @@ def get_overdue_periodic_tasks(now: datetime | None = None) -> list[dict]:
           AND COALESCE(o.scheduled_time, t.time_of_day) IS NOT NULL
           AND COALESCE(o.scheduled_time, t.time_of_day) != ''
           AND COALESCE(o.scheduled_time, t.time_of_day) <= ?
+          {task_kind_filter}
         ORDER BY COALESCE(o.scheduled_time, t.time_of_day), t.name, o.id
         """,
         (today, current_time),
@@ -543,7 +549,7 @@ def run_sync_subagent_memory(handler_payload: str | None, now: datetime | None =
         if not isinstance(entry, dict):
             continue
         session_id = entry.get('session_id')
-        if not isinstance(session_id, str) or not session_id:
+        if not looks_like_subagent_session(session_id):
             continue
         if filter_keyword and filter_keyword not in session_id:
             continue
@@ -708,12 +714,12 @@ def complete_identifier(identifier: str) -> tuple[bool, str]:
     return complete_legacy_entry(parse_entry_identifier(identifier))
 
 
-def complete_overdue_tasks(now: datetime | None = None, dry_run: bool = False) -> dict:
+def complete_overdue_tasks(now: datetime | None = None, dry_run: bool = False, system_only: bool = False) -> dict:
     now = now or datetime.now()
     ensure_today_occurrences()
 
-    periodic = get_overdue_periodic_tasks(now)
-    legacy = get_overdue_legacy_entries(now)
+    periodic = get_overdue_periodic_tasks(now, system_only=system_only)
+    legacy = [] if system_only else get_overdue_legacy_entries(now)
 
     completed: list[str] = []
     simulated: list[str] = []
@@ -955,9 +961,9 @@ def cmd_complete(identifier):
         return
 
 
-def cmd_complete_overdue(now_override: str | None = None, dry_run: bool = False):
+def cmd_complete_overdue(now_override: str | None = None, dry_run: bool = False, system_only: bool = False):
     now = datetime.strptime(now_override, '%Y-%m-%dT%H:%M') if now_override else datetime.now()
-    result = complete_overdue_tasks(now=now, dry_run=dry_run)
+    result = complete_overdue_tasks(now=now, dry_run=dry_run, system_only=system_only)
 
     print(f"=== Overdue Completion @ {result['now'].strftime('%Y-%m-%d %H:%M')} ===")
     if dry_run:
@@ -1181,7 +1187,7 @@ def main():
         elif args.command == 'complete':
             cmd_complete(args.identifier)
         elif args.command == 'complete-overdue':
-            cmd_complete_overdue(now_override=args.now_override, dry_run=args.dry_run)
+            cmd_complete_overdue(now_override=args.now_override, dry_run=args.dry_run, system_only=args.system_only)
         elif args.command == 'show':
             cmd_show(args.identifier)
     else:
