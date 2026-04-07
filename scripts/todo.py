@@ -459,6 +459,11 @@ def get_overdue_legacy_entries(now: datetime | None = None) -> list[dict]:
             continue
         if not (is_recurring_legacy_entry(text) or is_meta_review_entry(text)):
             continue
+
+        is_system_legacy = (group_name or '').strip().lower() == 'system'
+        task_kind = 'system' if is_system_legacy else 'scheduled'
+        special_handler = 'meta_review_fallback' if (is_system_legacy and is_meta_review_entry(text)) else None
+
         results.append(
             {
                 'identifier': f'ID{entry_id}',
@@ -467,7 +472,8 @@ def get_overdue_legacy_entries(now: datetime | None = None) -> list[dict]:
                 'group_name': group_name or 'Inbox',
                 'scheduled_time': scheduled_time,
                 'status': status,
-                'special_handler': 'meta_review_fallback' if is_meta_review_entry(text) else None,
+                'special_handler': special_handler,
+                'task_kind': task_kind,
             }
         )
     conn.close()
@@ -613,30 +619,63 @@ def build_merged_special_handler_result(
     return f"{base_result}{merge_suffix}"
 
 
-def complete_periodic_occurrence(occ_id: int, *, completion_mode: str = 'manual', special_handler_result: str | None = None) -> tuple[bool, str]:
+def complete_periodic_occurrence(
+    occ_id: int,
+    *,
+    completion_mode: str = 'manual',
+    special_handler_result: str | None = None,
+    completion_source: str = 'manual_cli',
+    trigger_label: str | None = None,
+    trigger_command: str | None = None,
+    allow_auto_for_scheduled: bool = False,
+) -> tuple[bool, str]:
     conn = sqlite3.connect(str(TODO_DB))
     try:
         cur = conn.cursor()
-        cur.execute("SELECT task_id, status FROM periodic_occurrences WHERE id = ?", (occ_id,))
+        cur.execute(
+            """
+            SELECT o.task_id, o.status, COALESCE(t.task_kind, 'scheduled'), o.date
+            FROM periodic_occurrences o
+            JOIN periodic_tasks t ON o.task_id = t.id
+            WHERE o.id = ?
+            """,
+            (occ_id,),
+        )
         row = cur.fetchone()
         if not row:
             return False, f"❌ 未找到 FIN-{occ_id}"
 
-        task_id, current_status = row
+        task_id, current_status, task_kind, occurrence_date = row
         if current_status == 'skipped':
             return False, f"❌ 无法完成已跳过的任务 FIN-{occ_id}"
         if current_status == 'completed':
             return True, f"⚠️  FIN-{occ_id} 已完成"
 
-        cur.execute(
-            """
+        if completion_source != 'manual_cli' and task_kind != 'system' and not allow_auto_for_scheduled:
+            return False, f"❌ 自动路径拒绝处理非 system 任务 FIN-{occ_id} (task_kind={task_kind})"
+
+        occurrence_columns = {info[1] for info in cur.execute("PRAGMA table_info(periodic_occurrences)").fetchall()}
+        extra_assignments = []
+        extra_params: list[str | None] = []
+        if 'completion_source' in occurrence_columns:
+            extra_assignments.append("completion_source = ?")
+            extra_params.append(completion_source)
+        if 'trigger_label' in occurrence_columns:
+            extra_assignments.append("trigger_label = COALESCE(?, trigger_label)")
+            extra_params.append(trigger_label)
+        if 'trigger_command' in occurrence_columns:
+            extra_assignments.append("trigger_command = COALESCE(?, trigger_command)")
+            extra_params.append(trigger_command)
+
+        update_sql = """
             UPDATE periodic_occurrences
             SET status = 'completed', completed_at = CURRENT_TIMESTAMP,
                 completion_mode = ?, special_handler_result = COALESCE(?, special_handler_result)
-            WHERE id = ?
-            """,
-            (completion_mode, special_handler_result, occ_id),
-        )
+        """
+        if extra_assignments:
+            update_sql += ",\n                " + ",\n                ".join(extra_assignments)
+        update_sql += "\n            WHERE id = ?\n            "
+        cur.execute(update_sql, (completion_mode, special_handler_result, *extra_params, occ_id))
         task_columns = {row[1] for row in cur.execute("PRAGMA table_info(periodic_tasks)").fetchall()}
         select_columns = ['cycle_type']
         if 'n_per_month' in task_columns:
@@ -653,16 +692,23 @@ def complete_periodic_occurrence(occ_id: int, *, completion_mode: str = 'manual'
             current_count_index = 2 if 'n_per_month' in task_columns and 'count_current_month' in task_columns else 1
             current_count = (cycle_type_row[current_count_index] if cycle_type_row and 'count_current_month' in task_columns else 0) or 0
             if n_per_month is not None and current_count + 1 >= n_per_month:
-                cur.execute(
-                    """
+                quota_params: list[str | None] = [task_id, occurrence_date]
+                quota_sql = """
                     UPDATE periodic_occurrences
                     SET status = 'completed', is_auto_completed = 1,
                         completion_mode = COALESCE(completion_mode, 'auto_quota')
+                """
+                if 'completion_source' in occurrence_columns:
+                    quota_sql += ",\n                        completion_source = COALESCE(completion_source, 'quota')"
+                if 'trigger_label' in occurrence_columns:
+                    quota_sql += ",\n                        trigger_label = COALESCE(trigger_label, 'monthly_quota')"
+                if 'trigger_command' in occurrence_columns:
+                    quota_sql += ",\n                        trigger_command = COALESCE(trigger_command, 'complete_periodic_occurrence')"
+                quota_sql += """
                     WHERE task_id = ? AND status IN ('pending', 'reminded')
                       AND strftime('%Y-%m', date) = strftime('%Y-%m', ?)
-                    """,
-                    (task_id, datetime.now().date().isoformat()),
-                )
+                """
+                cur.execute(quota_sql, tuple(quota_params))
 
         conn.commit()
     finally:
@@ -710,7 +756,13 @@ def complete_legacy_entry(entry_id: int) -> tuple[bool, str]:
 
 def complete_identifier(identifier: str) -> tuple[bool, str]:
     if identifier.startswith('FIN-'):
-        return complete_periodic_occurrence(int(identifier[4:]))
+        return complete_periodic_occurrence(
+            int(identifier[4:]),
+            completion_source='manual_cli',
+            trigger_label='manual_complete',
+            trigger_command='todo.py complete',
+            allow_auto_for_scheduled=True,
+        )
     return complete_legacy_entry(parse_entry_identifier(identifier))
 
 
@@ -750,7 +802,7 @@ def complete_overdue_tasks(now: datetime | None = None, dry_run: bool = False, s
             simulated.append(label)
             continue
 
-        completion_mode = 'manual'
+        completion_mode = 'auto_overdue'
         special_result = None
         if task.get('special_handler'):
             if merge_key:
@@ -810,7 +862,15 @@ def complete_overdue_tasks(now: datetime | None = None, dry_run: bool = False, s
                 completion_mode = 'fallback_handler'
                 completed.append(f"📝 {message}")
 
-        ok, message = complete_periodic_occurrence(task['occurrence_id'], completion_mode=completion_mode, special_handler_result=special_result)
+        ok, message = complete_periodic_occurrence(
+            task['occurrence_id'],
+            completion_mode=completion_mode,
+            special_handler_result=special_result,
+            completion_source='handler' if task.get('special_handler') else 'cron_full',
+            trigger_label=task.get('special_handler') or ('complete_overdue_system' if system_only else 'complete_overdue'),
+            trigger_command='todo.py complete-overdue --system-only' if system_only else 'todo.py complete-overdue',
+            allow_auto_for_scheduled=False,
+        )
         if ok:
             completed.append(message)
         else:
@@ -818,6 +878,12 @@ def complete_overdue_tasks(now: datetime | None = None, dry_run: bool = False, s
 
     for entry in legacy:
         handled.append(entry['identifier'])
+        if entry.get('task_kind') != 'system':
+            if dry_run:
+                simulated.append(f"{entry['identifier']} {entry['text']} @ {entry['scheduled_time']} [blocked non-system legacy]")
+            else:
+                errors.append(f"❌ 自动路径拒绝处理非 system 任务 {entry['identifier']} (legacy recurring entry)")
+            continue
         if dry_run:
             label = entry['text']
             if entry.get('special_handler') == 'meta_review_fallback':
@@ -1003,7 +1069,10 @@ def cmd_skip(identifier):
                 conn.close()
                 return
 
-            cur.execute("UPDATE periodic_occurrences SET status = 'skipped' WHERE id = ?", (occ_id,))
+            cur.execute(
+                "UPDATE periodic_occurrences SET status = 'skipped', completion_source = COALESCE(completion_source, 'manual_cli'), trigger_label = COALESCE(trigger_label, 'manual_skip'), trigger_command = COALESCE(trigger_command, 'todo.py skip') WHERE id = ?",
+                (occ_id,),
+            )
 
             if job_name:
                 try:
@@ -1054,7 +1123,8 @@ def cmd_show(identifier):
         cur.execute(
             """
             SELECT t.name, t.cycle_type, t.special_handler, o.date, o.status,
-                   o.reminder_job_id, o.completion_mode, o.special_handler_result, o.scheduled_time
+                   o.reminder_job_id, o.completion_mode, o.special_handler_result, o.scheduled_time,
+                   o.completion_source, o.trigger_label, o.trigger_command
             FROM periodic_occurrences o
             JOIN periodic_tasks t ON o.task_id = t.id
             WHERE o.id = ?
@@ -1064,7 +1134,7 @@ def cmd_show(identifier):
         row = cur.fetchone()
         conn.close()
         if row:
-            name, cycle_type, special_handler, date_str, status, job_id, completion_mode, special_handler_result, scheduled_time = row
+            name, cycle_type, special_handler, date_str, status, job_id, completion_mode, special_handler_result, scheduled_time, completion_source, trigger_label, trigger_command = row
             print(f"【周期任务】{name}")
             print(f"周期类型：{cycle_type}")
             print(f"日期：{date_str}")
@@ -1072,6 +1142,9 @@ def cmd_show(identifier):
             print(f"状态：{status}")
             print(f"special_handler：{special_handler or '无'}")
             print(f"completion_mode：{completion_mode or '无'}")
+            print(f"completion_source：{completion_source or '无'}")
+            print(f"trigger_label：{trigger_label or '无'}")
+            print(f"trigger_command：{trigger_command or '无'}")
             print(f"handler_result：{special_handler_result or '无'}")
             print(f"提醒任务：{job_id or '无'}")
         else:

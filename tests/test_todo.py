@@ -87,7 +87,10 @@ class TodoListVisibilityTests(unittest.TestCase):
                 cycle_type TEXT NOT NULL,
                 time_of_day TEXT,
                 count_current_month INTEGER DEFAULT 0,
-                legacy_entry_id INTEGER
+                legacy_entry_id INTEGER,
+                completion_source TEXT,
+                trigger_label TEXT,
+                trigger_command TEXT
             );
             CREATE TABLE periodic_occurrences (
                 id INTEGER PRIMARY KEY,
@@ -101,7 +104,10 @@ class TodoListVisibilityTests(unittest.TestCase):
                 special_handler_result TEXT,
                 scheduled_time TEXT,
                 scheduled_at TEXT,
-                legacy_entry_id INTEGER
+                legacy_entry_id INTEGER,
+                completion_source TEXT,
+                trigger_label TEXT,
+                trigger_command TEXT
             );
             """
         )
@@ -218,11 +224,15 @@ class TodoOverdueCompletionTests(unittest.TestCase):
                 special_handler_result TEXT,
                 scheduled_time TEXT,
                 scheduled_at TEXT,
-                legacy_entry_id INTEGER
+                legacy_entry_id INTEGER,
+                completion_source TEXT,
+                trigger_label TEXT,
+                trigger_command TEXT
             );
             """
         )
         conn.execute("INSERT INTO groups (id, name) VALUES (1, 'System')")
+        conn.execute("INSERT INTO groups (id, name) VALUES (2, 'Inbox')")
         conn.execute(
             "INSERT INTO periodic_tasks (id, name, category, cycle_type, time_of_day, count_current_month) VALUES (1, '周期测试任务', 'System', 'daily', '09:00', 0)"
         )
@@ -254,7 +264,7 @@ class TodoOverdueCompletionTests(unittest.TestCase):
             "INSERT INTO entries (id, text, status, group_id) VALUES (17, '每 4 小时 08:00：同步 subagent 记忆 (memory_manager.py sync)', 'pending', 1)"
         )
         conn.execute(
-            "INSERT INTO entries (id, text, status, group_id) VALUES (18, '给朋友发消息 21:00', 'pending', 1)"
+            "INSERT INTO entries (id, text, status, group_id) VALUES (19, '每周三 09:00 普通用户任务', 'pending', 2)"
         )
         conn.commit()
         conn.close()
@@ -262,14 +272,34 @@ class TodoOverdueCompletionTests(unittest.TestCase):
     def _connect(self):
         return sqlite3.connect(self.db_path)
 
-    def test_get_overdue_legacy_entries_filters_to_recurring_and_due(self):
+    def test_get_overdue_legacy_entries_filters_to_recurring_due_and_system_group(self):
         with patch.object(todo_module, 'TODO_DB', self.db_path):
             entries = todo_module.get_overdue_legacy_entries(datetime(2026, 3, 25, 11, 30))
 
         identifiers = [entry['identifier'] for entry in entries]
-        self.assertEqual(identifiers, ['ID16', 'ID17'])
+        self.assertEqual(identifiers, ['ID16', 'ID17', 'ID19'])
         self.assertEqual(entries[0]['special_handler'], 'meta_review_fallback')
+        self.assertEqual(entries[0]['group_name'], 'System')
+        self.assertEqual(entries[0]['task_kind'], 'system')
         self.assertIsNone(entries[1]['special_handler'])
+        self.assertEqual(entries[1]['task_kind'], 'system')
+        self.assertEqual(entries[2]['task_kind'], 'scheduled')
+
+    def test_get_overdue_legacy_entries_marks_non_system_group_as_scheduled(self):
+        conn = self._connect()
+        conn.execute(
+            "INSERT INTO entries (id, text, status, group_id) VALUES (20, '每周三 08:00 非 system 周期便签', 'pending', 999)"
+        )
+        conn.execute("INSERT INTO groups (id, name) VALUES (999, 'InboxRecurring')")
+        conn.commit()
+        conn.close()
+
+        with patch.object(todo_module, 'TODO_DB', self.db_path):
+            entries = todo_module.get_overdue_legacy_entries(datetime(2026, 3, 25, 11, 30))
+
+        matched = next(entry for entry in entries if entry['identifier'] == 'ID20')
+        self.assertEqual(matched['task_kind'], 'scheduled')
+        self.assertIsNone(matched['special_handler'])
 
     def test_archived_readonly_legacy_entry_is_rejected_by_complete_skip_and_show(self):
         conn = self._connect()
@@ -389,35 +419,48 @@ class TodoOverdueCompletionTests(unittest.TestCase):
             mock_subprocess.run.side_effect = fake_run
             result = todo_module.complete_overdue_tasks(now=datetime(2026, 3, 25, 11, 30))
 
-        self.assertFalse(result['errors'])
-        self.assertEqual(result['handled'], ['FIN-303', 'FIN-202', 'FIN-304', 'FIN-305', 'FIN-101', 'ID16', 'ID17'])
+        # Guardrail: non-system scheduled tasks should be blocked (reported as errors), but system tasks
+        # still run to completion.
+        self.assertTrue(any('自动路径拒绝处理非 system 任务 FIN-101' in err for err in result['errors']))
+        self.assertTrue(any('自动路径拒绝处理非 system 任务 ID19' in err for err in result['errors']))
+        self.assertEqual(result['handled'], ['FIN-303', 'FIN-202', 'FIN-304', 'FIN-305', 'FIN-101', 'ID16', 'ID17', 'ID19'])
 
         conn = self._connect()
         special_row = conn.execute(
-            "SELECT status, completion_mode, special_handler_result FROM periodic_occurrences WHERE id = 202"
+            "SELECT status, completion_mode, completion_source, trigger_label, trigger_command, special_handler_result FROM periodic_occurrences WHERE id = 202"
         ).fetchone()
         sync_rows = conn.execute(
-            "SELECT id, status, completion_mode, special_handler_result FROM periodic_occurrences WHERE id IN (303, 304, 305) ORDER BY id"
+            "SELECT id, status, completion_mode, completion_source, trigger_label, trigger_command, special_handler_result FROM periodic_occurrences WHERE id IN (303, 304, 305) ORDER BY id"
         ).fetchall()
         occ_status = conn.execute("SELECT status FROM periodic_occurrences WHERE id = 101").fetchone()[0]
         meta_status = conn.execute("SELECT status FROM entries WHERE id = 16").fetchone()[0]
         recurring_status = conn.execute("SELECT status FROM entries WHERE id = 17").fetchone()[0]
-        future_status = conn.execute("SELECT status FROM entries WHERE id = 18").fetchone()[0]
+        future_row = conn.execute("SELECT status FROM entries WHERE id = 18").fetchone()
+        future_status = future_row[0] if future_row else None
         conn.close()
 
         self.assertEqual(special_row[0], 'completed')
         self.assertEqual(special_row[1], 'fallback_handler')
-        self.assertIn('Meta-Review fallback completed via direct PREDICTIONS.md/FRICTION.md inspection', special_row[2])
+        self.assertEqual(special_row[2], 'handler')
+        self.assertEqual(special_row[3], 'meta_review_fallback')
+        self.assertEqual(special_row[4], 'todo.py complete-overdue')
+        self.assertIn('Meta-Review fallback completed via direct PREDICTIONS.md/FRICTION.md inspection', special_row[5])
         self.assertEqual([row[1] for row in sync_rows], ['completed', 'completed', 'completed'])
         self.assertEqual([row[2] for row in sync_rows], ['fallback_handler_merged', 'fallback_handler_merged', 'fallback_handler_merged'])
+        self.assertEqual([row[3] for row in sync_rows], ['handler', 'handler', 'handler'])
+        self.assertEqual([row[4] for row in sync_rows], ['sync_subagent_memory', 'sync_subagent_memory', 'sync_subagent_memory'])
+        self.assertEqual([row[5] for row in sync_rows], ['todo.py complete-overdue', 'todo.py complete-overdue', 'todo.py complete-overdue'])
         for index, row in enumerate(sync_rows, start=1):
-            self.assertIn('Subagent memory sync completed', row[3])
-            self.assertIn('merge_key=sync_subagent_memory:3:2026-03-25', row[3])
-            self.assertIn(f'merged occurrence {index}/3', row[3])
-        self.assertEqual(occ_status, 'completed')
+            self.assertIn('Subagent memory sync completed', row[6])
+            self.assertIn('merge_key=sync_subagent_memory:3:2026-03-25', row[6])
+            self.assertIn(f'merged occurrence {index}/3', row[6])
+        self.assertEqual(occ_status, 'pending')
         self.assertEqual(meta_status, 'done')
         self.assertEqual(recurring_status, 'done')
-        self.assertEqual(future_status, 'pending')
+        self.assertEqual(future_status, 'pending' if future_status is not None else None)
+
+        legacy_regular_status = self._connect().execute("SELECT status FROM entries WHERE id = 19").fetchone()[0]
+        self.assertEqual(legacy_regular_status, 'pending')
 
         memory_log = (self.workspace / 'memory' / '2026-03-25.md').read_text(encoding='utf-8')
         self.assertIn('Meta-Review fallback completed via direct PREDICTIONS.md/FRICTION.md inspection', memory_log)
@@ -458,11 +501,12 @@ class TodoOverdueCompletionTests(unittest.TestCase):
             mock_subprocess.run.return_value = type('Result', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
             result = todo_module.complete_overdue_tasks(now=datetime(2026, 3, 25, 11, 30), dry_run=True)
 
-        self.assertEqual(result['handled'], ['FIN-303', 'FIN-202', 'FIN-304', 'FIN-305', 'FIN-101', 'ID16', 'ID17'])
-        self.assertEqual(len(result['simulated']), 7)
+        self.assertEqual(result['handled'], ['FIN-303', 'FIN-202', 'FIN-304', 'FIN-305', 'FIN-101', 'ID16', 'ID17', 'ID19'])
+        self.assertEqual(len(result['simulated']), 8)
         self.assertIn('FIN-303 同步 subagent 记忆 @ 00:00 [sync_subagent_memory] [merge-once day-batch x3]', result['simulated'])
         self.assertIn('FIN-304 同步 subagent 记忆 @ 04:00 [sync_subagent_memory] [merge-once day-batch x3]', result['simulated'])
         self.assertIn('FIN-305 同步 subagent 记忆 @ 08:00 [sync_subagent_memory] [merge-once day-batch x3]', result['simulated'])
+        self.assertIn('ID19 每周三 09:00 普通用户任务 @ 09:00 [blocked non-system legacy]', result['simulated'])
 
         conn = self._connect()
         occ_status = conn.execute("SELECT status FROM periodic_occurrences WHERE id = 101").fetchone()[0]
@@ -494,6 +538,81 @@ class TodoOverdueCompletionTests(unittest.TestCase):
         self.assertFalse(any(item.startswith('ID16') for item in result['simulated']))
         self.assertFalse(any(item.startswith('ID17') for item in result['simulated']))
 
+    def test_complete_overdue_tasks_fail_closed_for_non_system_scheduled_occurrence(self):
+        with patch.object(todo_module, 'TODO_DB', self.db_path), \
+             patch.object(todo_module, 'ensure_today_occurrences'):
+            result = todo_module.complete_overdue_tasks(now=datetime(2026, 3, 25, 11, 30), dry_run=False)
+
+        self.assertTrue(any('自动路径拒绝处理非 system 任务 FIN-101' in err for err in result['errors']))
+
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT status, completion_mode, completion_source, trigger_label, trigger_command FROM periodic_occurrences WHERE id = 101"
+        ).fetchone()
+        legacy_row = conn.execute("SELECT status FROM entries WHERE id = 19").fetchone()
+        conn.close()
+
+        self.assertEqual(row, ('pending', None, None, None, None))
+        self.assertEqual(legacy_row[0], 'pending')
+
+    def test_manual_complete_keeps_regular_scheduled_task_supported(self):
+        with patch.object(todo_module, 'TODO_DB', self.db_path):
+            ok, message = todo_module.complete_periodic_occurrence(
+                101,
+                completion_source='manual_cli',
+                trigger_label='manual_complete',
+                trigger_command='todo.py complete',
+                allow_auto_for_scheduled=True,
+            )
+
+        self.assertTrue(ok)
+        self.assertIn('已完成 FIN-101', message)
+
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT status, completion_mode, completion_source, trigger_label, trigger_command FROM periodic_occurrences WHERE id = 101"
+        ).fetchone()
+        conn.close()
+
+        self.assertEqual(row, ('completed', 'manual', 'manual_cli', 'manual_complete', 'todo.py complete'))
+
+    def test_cmd_show_displays_occurrence_audit_fields(self):
+        with patch.object(todo_module, 'TODO_DB', self.db_path):
+            todo_module.complete_periodic_occurrence(
+                202,
+                completion_mode='fallback_handler',
+                special_handler_result='ok',
+                completion_source='handler',
+                trigger_label='meta_review_fallback',
+                trigger_command='todo.py complete-overdue',
+            )
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                todo_module.cmd_show('FIN-202')
+
+        output = buf.getvalue()
+        self.assertIn('completion_source：handler', output)
+        self.assertIn('trigger_label：meta_review_fallback', output)
+        self.assertIn('trigger_command：todo.py complete-overdue', output)
+
+    def test_complete_overdue_cli_system_only_leaves_regular_scheduled_pending(self):
+        buf = io.StringIO()
+        with patch.object(todo_module, 'TODO_DB', self.db_path), \
+             patch.object(todo_module, 'ensure_today_occurrences'), \
+             redirect_stdout(buf):
+            todo_module.cmd_complete_overdue(now_override='2026-03-25T11:30', dry_run=False, system_only=True)
+
+        conn = self._connect()
+        regular = conn.execute("SELECT status FROM periodic_occurrences WHERE id = 101").fetchone()[0]
+        system_rows = conn.execute(
+            "SELECT id, status FROM periodic_occurrences WHERE id IN (202, 303, 304, 305) ORDER BY id"
+        ).fetchall()
+        conn.close()
+
+        self.assertEqual(regular, 'pending')
+        self.assertEqual([row[1] for row in system_rows], ['completed', 'completed', 'completed', 'completed'])
+        self.assertNotIn('FIN-101', buf.getvalue())
+
     def test_complete_periodic_occurrence_auto_completes_rest_of_month_for_monthly_quota_task(self):
         conn = self._connect()
         conn.execute("INSERT INTO periodic_tasks (id, name, category, cycle_type, n_per_month, time_of_day, count_current_month) VALUES (4, '福建农行秒杀京东卡', 'System', 'monthly_n_times', 1, '09:00', 0)")
@@ -511,13 +630,13 @@ class TodoOverdueCompletionTests(unittest.TestCase):
 
         conn = self._connect()
         task_row = conn.execute("SELECT count_current_month FROM periodic_tasks WHERE id = 4").fetchone()
-        occ_rows = conn.execute("SELECT id, status, is_auto_completed, completion_mode FROM periodic_occurrences WHERE task_id = 4 ORDER BY id").fetchall()
+        occ_rows = conn.execute("SELECT id, status, is_auto_completed, completion_mode, completion_source, trigger_label, trigger_command FROM periodic_occurrences WHERE task_id = 4 ORDER BY id").fetchall()
         conn.close()
 
         self.assertEqual(task_row[0], 1)
-        self.assertEqual(occ_rows[0], (401, 'completed', 0, 'manual'))
-        self.assertEqual(occ_rows[1], (402, 'completed', 1, 'auto_quota'))
-        self.assertEqual(occ_rows[2], (403, 'completed', 1, 'auto_quota'))
+        self.assertEqual(occ_rows[0], (401, 'completed', 0, 'manual', 'manual_cli', None, None))
+        self.assertEqual(occ_rows[1], (402, 'completed', 1, 'auto_quota', 'quota', 'monthly_quota', 'complete_periodic_occurrence'))
+        self.assertEqual(occ_rows[2], (403, 'completed', 1, 'auto_quota', 'quota', 'monthly_quota', 'complete_periodic_occurrence'))
 
 
 if __name__ == "__main__":
