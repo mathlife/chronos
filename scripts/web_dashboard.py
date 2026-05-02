@@ -74,6 +74,16 @@ HTML_PAGE = """<!doctype html>
         <div id="channels"></div>
       </section>
       <section class="card" style="grid-column:1/-1;">
+        <h2>Edit Guard</h2>
+        <div class="row">
+          <div>
+            <label><input type="checkbox" id="editMode" /> Enable edit mode in browser</label>
+            <div class="muted">Server read-only mode still has priority.</div>
+          </div>
+          <div class="muted" id="editState"></div>
+        </div>
+      </section>
+      <section class="card" style="grid-column:1/-1;">
         <h2>Config & Channel Ops</h2>
         <div class="row">
           <div>
@@ -147,6 +157,44 @@ HTML_PAGE = """<!doctype html>
       box.textContent = msg;
       setTimeout(() => { box.textContent = ''; }, 6000);
     }
+    let serverReadOnly = false;
+    function editingEnabled() {
+      return document.getElementById('editMode').checked;
+    }
+    function ensureWritableAction() {
+      if (serverReadOnly) throw new Error('server is running in read-only mode');
+      if (!editingEnabled()) throw new Error('enable edit mode first');
+    }
+    function applyEditLock() {
+      const enabled = editingEnabled() && !serverReadOnly;
+      const targets = [
+        'legacyChatId','removeChannelId','channelJson','createTaskJson',
+        'updateTaskId','removeTaskId','updateTaskJson'
+      ];
+      for (const id of targets) {
+        const el = document.getElementById(id);
+        if (el) el.disabled = !enabled;
+      }
+      document.querySelectorAll('button').forEach((btn) => {
+        const text = (btn.textContent || '').toLowerCase();
+        if (text.includes('create') || text.includes('update') || text.includes('remove') || text.includes('delete') || text.includes('deactivate') || text.includes('upsert')) {
+          btn.disabled = !enabled;
+        }
+      });
+      const state = document.getElementById('editState');
+      if (serverReadOnly) {
+        state.textContent = 'Server mode: read-only';
+      } else if (enabled) {
+        state.textContent = 'Server mode: writable; browser edit mode enabled';
+      } else {
+        state.textContent = 'Server mode: writable; browser edit mode disabled';
+      }
+    }
+    document.addEventListener('DOMContentLoaded', () => {
+      const em = document.getElementById('editMode');
+      em.addEventListener('change', applyEditLock);
+      applyEditLock();
+    });
     async function callApi(path, payload) {
       const res = await fetch(path, {
         method: 'POST',
@@ -159,6 +207,7 @@ HTML_PAGE = """<!doctype html>
     }
     async function createTask() {
       try {
+        ensureWritableAction();
         const payload = JSON.parse(document.getElementById('createTaskJson').value);
         const r = await callApi('/api/task/create', { payload });
         setResult(true, `created task ${r.data.id}`);
@@ -167,6 +216,7 @@ HTML_PAGE = """<!doctype html>
     }
     async function updateTask() {
       try {
+        ensureWritableAction();
         const id = Number(document.getElementById('updateTaskId').value.trim());
         const patch = JSON.parse(document.getElementById('updateTaskJson').value);
         const r = await callApi('/api/task/update', { id, patch });
@@ -176,7 +226,12 @@ HTML_PAGE = """<!doctype html>
     }
     async function removeTask(hard) {
       try {
+        ensureWritableAction();
         const id = Number(document.getElementById('removeTaskId').value.trim());
+        if (hard) {
+          const sure = window.prompt(`Type DELETE-${id} to confirm hard deletion`);
+          if (sure !== `DELETE-${id}`) throw new Error('hard delete cancelled');
+        }
         await callApi('/api/task/remove', { id, hard });
         setResult(true, hard ? `hard-deleted task ${id}` : `deactivated task ${id}`);
         await load();
@@ -184,6 +239,7 @@ HTML_PAGE = """<!doctype html>
     }
     async function putChannel() {
       try {
+        ensureWritableAction();
         const channel = JSON.parse(document.getElementById('channelJson').value);
         await callApi('/api/channel/put', { channel });
         setResult(true, `upserted channel ${channel.id}`);
@@ -192,6 +248,7 @@ HTML_PAGE = """<!doctype html>
     }
     async function removeChannel() {
       try {
+        ensureWritableAction();
         const id = document.getElementById('removeChannelId').value.trim();
         await callApi('/api/channel/remove', { id });
         setResult(true, `removed channel ${id}`);
@@ -200,6 +257,7 @@ HTML_PAGE = """<!doctype html>
     }
     async function updateSettings() {
       try {
+        ensureWritableAction();
         const chat_id = document.getElementById('legacyChatId').value.trim();
         await callApi('/api/settings/update', { chat_id });
         setResult(true, 'updated settings');
@@ -211,15 +269,18 @@ HTML_PAGE = """<!doctype html>
       const data = await res.json();
       document.getElementById('meta').textContent = `updated: ${data.generated_at} | today: ${data.today}`;
       const s = data.settings || {};
+      serverReadOnly = Boolean(s.read_only);
       document.getElementById('settings').innerHTML = `
         <div><span class="pill">${esc(s.config_status || 'unknown')}</span></div>
         <pre>config_path: ${esc(s.config_path)}
 config_exists: ${esc(s.config_exists)}
 channels_present: ${esc(s.channels_present)}
 system_scheduler: ${esc(s.system_scheduler)}
+read_only: ${esc(s.read_only)}
 db_path: ${esc(s.db_path)}</pre>
         ${s.error ? `<div class="warn">error: ${esc(s.error)}</div>` : ''}
       `;
+      applyEditLock();
       if (data.legacy_chat_id) {
         document.getElementById('legacyChatId').value = data.legacy_chat_id;
       }
@@ -278,7 +339,7 @@ def _safe_query(conn: sqlite3.Connection, query: str, params: tuple[Any, ...] = 
         return []
 
 
-def build_snapshot(db_path: Path) -> dict:
+def build_snapshot(db_path: Path, *, read_only: bool = False) -> dict:
     now = datetime.now(SHANGHAI_TZ)
     today = now.date().isoformat()
     config_info = inspect_config()
@@ -293,6 +354,7 @@ def build_snapshot(db_path: Path) -> dict:
             "config_exists": config_info.get("config_exists"),
             "channels_present": config_info.get("channels_present"),
             "system_scheduler": supports_system_scheduler(),
+            "read_only": bool(read_only),
             "db_path": str(db_path),
             "error": config_info.get("error"),
         },
@@ -395,6 +457,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     db_path: Path = TODO_DB
     basic_auth_token: str | None = None
     debug_errors: bool = False
+    read_only_mode: bool = False
 
     def do_GET(self) -> None:  # noqa: N802
         if not self._check_auth():
@@ -405,7 +468,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._write_html(HTML_PAGE)
             return
         if parsed.path == "/api/snapshot":
-            payload = build_snapshot(self.db_path)
+            payload = build_snapshot(self.db_path, read_only=self.read_only_mode)
             self._write_json(payload)
             return
         self.send_response(404)
@@ -418,6 +481,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         parsed = urlparse(self.path)
         try:
+            if self.read_only_mode:
+                raise ValueError("server is running in read-only mode")
             payload = self._read_json_body()
             result = handle_mutation(parsed.path, payload)
             self._write_json({"ok": True, "data": result})
@@ -541,6 +606,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db-path", default=str(TODO_DB))
     parser.add_argument("--basic-auth", help="HTTP Basic auth credential in user:password format")
     parser.add_argument("--allow-unauthenticated-remote", action="store_true", help="Allow non-local bind without auth (unsafe)")
+    parser.add_argument("--read-only", action="store_true", help="Disable all mutation APIs")
     parser.add_argument("--debug-errors", action="store_true", help="Return internal error details in HTTP responses")
     parser.add_argument("--dump-json", action="store_true", help="Print one snapshot JSON and exit")
     return parser
@@ -550,7 +616,7 @@ def main() -> int:
     args = build_parser().parse_args()
     db_path = Path(args.db_path).expanduser()
     if args.dump_json:
-        print(json.dumps(build_snapshot(db_path), ensure_ascii=False, indent=2))
+        print(json.dumps(build_snapshot(db_path, read_only=bool(args.read_only)), ensure_ascii=False, indent=2))
         return 0
 
     if not _is_local_bind(args.host) and not args.basic_auth and not args.allow_unauthenticated_remote:
@@ -565,6 +631,7 @@ def main() -> int:
     DashboardHandler.db_path = db_path
     DashboardHandler.debug_errors = bool(args.debug_errors)
     DashboardHandler.basic_auth_token = _encode_basic_auth_token(args.basic_auth) if args.basic_auth else None
+    DashboardHandler.read_only_mode = bool(args.read_only)
     server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
     print(f"Chronos dashboard running at http://{args.host}:{args.port}")
     print(f"Using DB: {db_path}")
@@ -572,6 +639,8 @@ def main() -> int:
         print("Basic auth: enabled")
     elif not _is_local_bind(args.host):
         print("Warning: running without auth on remote bind (unsafe)")
+    if args.read_only:
+        print("Mutation APIs: disabled (read-only mode)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

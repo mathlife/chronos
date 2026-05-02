@@ -6,8 +6,12 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 import uuid
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+from http.server import ThreadingHTTPServer
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -16,7 +20,7 @@ TMP_ROOT.mkdir(parents=True, exist_ok=True)
 
 from core import db as db_module
 from core import paths as paths_module
-from scripts.web_dashboard import build_snapshot, handle_mutation
+from scripts.web_dashboard import DashboardHandler, build_snapshot, handle_mutation
 
 
 SCHEMA_SQL = """
@@ -132,10 +136,11 @@ def test_snapshot_excludes_linked_legacy_entries() -> None:
     conn.commit()
     conn.close()
 
-    snapshot = build_snapshot(db_path)
+    snapshot = build_snapshot(db_path, read_only=True)
     identifiers = {item["identifier"] for item in snapshot["today_tasks"]}
     assert "ID10" not in identifiers
     assert "ID11" in identifiers
+    assert snapshot["settings"]["read_only"] is True
 
     if original_config is None:
         os.environ.pop("CHRONOS_CONFIG_PATH", None)
@@ -190,8 +195,63 @@ def test_mutation_ops() -> None:
     reset_db_singleton()
 
 
+def test_read_only_server_rejects_mutation() -> None:
+    case_dir = make_case_dir("web-read-only")
+    db_path = case_dir / "todo.db"
+    config_path = case_dir / "config.json"
+    config_path.write_text(json.dumps({"channels": []}, ensure_ascii=False), encoding="utf-8")
+    original_config = os.environ.get("CHRONOS_CONFIG_PATH")
+    os.environ["CHRONOS_CONFIG_PATH"] = str(config_path)
+
+    prepare_temp_db(db_path)
+    paths_module.TODO_DB = db_path
+    db_module.TODO_DB = db_path
+    reset_db_singleton()
+
+    DashboardHandler.db_path = db_path
+    DashboardHandler.basic_auth_token = None
+    DashboardHandler.debug_errors = False
+    DashboardHandler.read_only_mode = True
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), DashboardHandler)
+    host, port = server.server_address
+
+    def serve_one() -> None:
+        server.handle_request()
+
+    thread = threading.Thread(target=serve_one, daemon=True)
+    thread.start()
+
+    payload = json.dumps({"chat_id": "1"}).encode("utf-8")
+    request = Request(
+        f"http://{host}:{port}/api/settings/update",
+        method="POST",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+
+    try:
+        try:
+            urlopen(request, timeout=5)
+            raise AssertionError("expected HTTPError for read-only mutation")
+        except HTTPError as exc:
+            assert exc.code == 400
+            body = exc.read().decode("utf-8")
+            assert "read-only mode" in body
+    finally:
+        server.server_close()
+
+    if original_config is None:
+        os.environ.pop("CHRONOS_CONFIG_PATH", None)
+    else:
+        os.environ["CHRONOS_CONFIG_PATH"] = original_config
+    reset_db_singleton()
+
+
 if __name__ == "__main__":
     test_snapshot_excludes_linked_legacy_entries()
     print("[ok] snapshot excludes linked legacy entries")
     test_mutation_ops()
     print("[ok] mutation ops for task/channel/settings")
+    test_read_only_server_rejects_mutation()
+    print("[ok] read-only server rejects mutation")
