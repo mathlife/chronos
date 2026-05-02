@@ -15,8 +15,8 @@ from core.db import DB, db_commit, clear_task_cache, get_periodic_tasks, get_per
 from core.scheduler import TaskScheduler, to_shanghai_date
 from core.learning import LearningContext
 from core.models import PeriodicTask, ALLOWED_CYCLE_TYPES
-from core.config import get_chat_id
-from core.openclaw_cron import build_cron_add_command, build_cron_remove_command
+from core.config import get_config
+from core.notifiers import dispatch_message
 from core.paths import PYTHON_BIN, SCRIPTS_DIR
 from core.system_scheduler import build_job_command, build_job_name, create_once_job, remove_job, supports_system_scheduler
 from core.timezones import get_shanghai_tz, get_utc_tz
@@ -222,7 +222,8 @@ class PeriodicTaskManager:
         return self.db.execute(
             """
             SELECT o.id, o.task_id, o.date, o.status, o.reminder_job_id, o.execution_job_id, o.scheduled_time,
-                   t.name, t.task_kind, t.time_of_day, t.reminder_template, t.special_handler, t.handler_payload
+                   t.name, t.task_kind, t.time_of_day, t.reminder_template, t.special_handler, t.handler_payload,
+                   t.delivery_target
             FROM periodic_occurrences o
             JOIN periodic_tasks t ON t.id = o.task_id
             WHERE o.id = ?
@@ -230,33 +231,35 @@ class PeriodicTaskManager:
             (occurrence_id,),
         ).fetchone()
 
-    def _send_message_now(self, message_text: str) -> bool:
+    def _send_message_now(self, message_text: str, *, task: Optional[dict] = None, occurrence_id: Optional[int] = None) -> bool:
         try:
-            chat_id = get_chat_id()
+            config = get_config()
         except ValueError as exc:
-            print(f"Chronos chat_id not configured: {exc}")
+            print(f"Chronos config invalid: {exc}")
             return False
 
-        now_utc = datetime.now(UTC_TZ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        try:
-            result = subprocess.run(
-                build_cron_add_command(
-                    job_name=f"chronos_immediate_{int(datetime.now(UTC_TZ).timestamp())}",
-                    at_iso=now_utc,
-                    message=message_text,
-                    chat_id=chat_id,
-                ),
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            print(f"Failed to enqueue immediate message: {exc}")
+        targets = None
+        delivery_target = (task or {}).get("delivery_target")
+        if isinstance(delivery_target, str) and delivery_target.strip():
+            targets = [chunk.strip() for chunk in delivery_target.split(",") if chunk.strip()]
+
+        meta = {
+            "source": "chronos",
+            "occurrence_id": occurrence_id,
+            "task_id": (task or {}).get("id"),
+            "task_name": (task or {}).get("name"),
+            "task_kind": (task or {}).get("task_kind"),
+        }
+        results = dispatch_message(config=config, message=message_text, meta=meta, target_ids=targets)
+        if not results:
+            print("No notifier channels configured/enabled.")
             return False
-        if result.returncode != 0:
-            print(f"Failed to enqueue immediate message: {result.stderr}")
-            return False
-        return True
+        failures = [r for r in results if not r.ok]
+        if failures:
+            print("Some notification channels failed:")
+            for f in failures:
+                print(f"- {f.channel_id} ({f.channel_type}): {f.error}")
+        return any(r.ok for r in results)
 
     def _mark_occurrence_reminded(self, occurrence_id: int, reminder_job_id: str | None = None) -> None:
         self.db.execute(
@@ -327,10 +330,6 @@ class PeriodicTaskManager:
                     for reminder_job_name, execution_job_name in cleanup_rows:
                         if reminder_job_name:
                             remove_job(reminder_job_name)
-                            try:
-                                subprocess.run(build_cron_remove_command(reminder_job_name), capture_output=True, text=True, timeout=10)
-                            except Exception:
-                                pass
                         if execution_job_name:
                             remove_job(execution_job_name)
                     self.db.execute(
@@ -388,7 +387,8 @@ class PeriodicTaskManager:
         if not time_of_day:
             return False
         message_text = self._format_reminder_message(row["name"], occ_date, time_of_day, row["reminder_template"], immediate=False)
-        if not self._send_message_now(message_text):
+        task_dict = {"id": row["task_id"], "name": row["name"], "task_kind": row["task_kind"], "delivery_target": row["delivery_target"]}
+        if not self._send_message_now(message_text, task=task_dict, occurrence_id=occurrence_id):
             return False
         self._mark_occurrence_reminded(occurrence_id, reminder_job_id=row["reminder_job_id"])
         return True
@@ -427,80 +427,22 @@ class PeriodicTaskManager:
         db_commit()
         return True
 
-    def schedule_reminder_cron(self, task_id: int, occ_date: date, time_of_day: str) -> Optional[str]:
-        cur = self.db.execute(
-            "SELECT name, reminder_template FROM periodic_tasks WHERE id = ?",
-            (task_id,),
-        )
-        row = cur.fetchone()
-        if not row:
-            return None
-        task_name, reminder_template = row[0], row[1]
-
-        try:
-            chat_id = get_chat_id()
-        except ValueError as exc:
-            print(f"Chronos chat_id not configured: {exc}")
+    def schedule_reminder_job(self, occurrence_id: int, occ_date: date, time_of_day: str) -> Optional[str]:
+        if not supports_system_scheduler():
+            print("System scheduler not available (requires crontab).")
             return None
 
         hour, minute = map(int, time_of_day.split(':'))
-        reminder_minute = minute - 5
-        reminder_hour = hour
-        reminder_date = occ_date
-
-        if reminder_minute < 0:
-            reminder_minute += 60
-            reminder_hour -= 1
-            if reminder_hour < 0:
-                reminder_hour += 24
-                reminder_date = occ_date - timedelta(days=1)
-
-        dt_shanghai = datetime(reminder_date.year, reminder_date.month, reminder_date.day, reminder_hour, reminder_minute, tzinfo=SHANGHAI_TZ)
-        utc_dt = dt_shanghai.astimezone(UTC_TZ)
-
-        now_utc = datetime.now(UTC_TZ)
-        if utc_dt <= now_utc:
-            message_text = self._format_reminder_message(task_name, occ_date, time_of_day, reminder_template, immediate=True)
-            immediate_job_name = f"reminder_immediate_{task_id}_{occ_date.strftime('%Y%m%d')}_{time_of_day.replace(':', '')}"
-            try:
-                subprocess.run(
-                    build_cron_add_command(
-                        job_name=immediate_job_name,
-                        at_iso=now_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-                        message=message_text,
-                        chat_id=chat_id,
-                    ),
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-            except (OSError, subprocess.SubprocessError) as e:
-                print(f"Failed to send immediate reminder: {e}")
+        run_at = datetime(occ_date.year, occ_date.month, occ_date.day, hour, minute, tzinfo=SHANGHAI_TZ) - timedelta(minutes=5)
+        if run_at <= datetime.now(SHANGHAI_TZ):
+            # Too late to schedule; rely on complete-overdue or manual firing.
             return None
 
-        iso_time = utc_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        try:
-            task_row = get_periodic_task(task_id) or {}
-        except Exception:
-            task_row = {}
-        cycle_type = task_row.get('cycle_type')
-        interval_hours = task_row.get('interval_hours')
-        if cycle_type == 'hourly' and interval_hours not in (None, 24):
-            job_name = f"task_reminder_{task_id}_{occ_date.strftime('%Y%m%d')}_{time_of_day.replace(':', '')}"
-        else:
-            job_name = f"task_reminder_{task_id}_{occ_date.strftime('%Y%m%d')}"
-        message_text = self._format_reminder_message(task_name, occ_date, time_of_day, reminder_template, immediate=False)
-
-        cmd = build_cron_add_command(job_name=job_name, at_iso=iso_time, message=message_text, chat_id=chat_id)
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        except (OSError, subprocess.SubprocessError) as e:
-            print(f"Failed to schedule cron: {e}")
-            return None
-        if result.returncode == 0:
-            return job_name
-        print(f"Failed to schedule cron: {result.stderr}")
-        return None
+        job_name = build_job_name("reminder", occurrence_id)
+        script_path = SCRIPTS_DIR / "periodic_task_manager.py"
+        command = build_job_command(PYTHON_BIN, script_path, "--fire-reminder", occurrence_id)
+        create_once_job(job_name=job_name, command=command, run_at=run_at)
+        return job_name
 
     def generate_reminders_for_today(self) -> int:
         today = to_shanghai_date()
@@ -545,7 +487,7 @@ class PeriodicTaskManager:
                         scheduled += 1
                     continue
                 if not job_name:
-                    job_name = self.schedule_reminder_cron(task.id, today, schedule_time)
+                    job_name = self.schedule_reminder_job(occ_id, today, schedule_time)
                     if job_name:
                         self.db.execute("UPDATE periodic_occurrences SET reminder_job_id = ? WHERE id = ?", (job_name, occ_id))
                         db_commit()
@@ -571,12 +513,8 @@ class PeriodicTaskManager:
             reminder_removed = False
             execution_removed = False
             try:
-                if task_kind == 'system':
-                    reminder_removed = remove_job(reminder_job_name)
-                    execution_removed = remove_job(execution_job_name)
-                else:
-                    result = subprocess.run(build_cron_remove_command(reminder_job_name), capture_output=True, text=True, timeout=10)
-                    reminder_removed = result.returncode == 0
+                reminder_removed = remove_job(reminder_job_name)
+                execution_removed = remove_job(execution_job_name)
                 if reminder_removed or execution_removed:
                     self.db.execute(
                         "UPDATE periodic_occurrences SET reminder_job_id = NULL, execution_job_id = NULL WHERE id = ?",
@@ -647,11 +585,8 @@ class PeriodicTaskManager:
             jobs = cur.fetchall()
             for reminder_job_name, execution_job_name, task_kind in jobs:
                 try:
-                    if task_kind == 'system':
-                        remove_job(reminder_job_name)
-                        remove_job(execution_job_name)
-                    elif reminder_job_name:
-                        subprocess.run(build_cron_remove_command(reminder_job_name), capture_output=True, text=True, timeout=10)
+                    remove_job(reminder_job_name)
+                    remove_job(execution_job_name)
                 except Exception:
                     pass
             self.db.execute(
@@ -809,30 +744,8 @@ class PeriodicTaskManager:
         return "\n".join(lines)
 
     def _send_today_todo_snapshot(self, today: date) -> bool:
-        try:
-            chat_id = get_chat_id()
-        except ValueError as exc:
-            print(f"Chronos chat_id not configured for todo snapshot: {exc}")
-            return False
-
-        now_utc = datetime.now(UTC_TZ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         message_text = self._build_today_todo_snapshot(today)
-        job_name = f"todo_snapshot_{today.strftime('%Y%m%d')}"
-        try:
-            result = subprocess.run(
-                build_cron_add_command(job_name=job_name, at_iso=now_utc, message=message_text, chat_id=chat_id),
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        except (OSError, subprocess.SubprocessError) as e:
-            print(f"Failed to send todo snapshot: {e}")
-            return False
-
-        if result.returncode != 0:
-            print(f"Failed to send todo snapshot: {result.stderr}")
-            return False
-        return True
+        return self._send_message_now(message_text, task={"id": None, "name": "todo_snapshot", "task_kind": "system", "delivery_target": None})
 
     def run_daily(self) -> int:
         with LearningContext("periodic_manager_daily_run", "Generate today's reminders, clean old cron jobs, and push today's todo snapshot", confidence="H"):

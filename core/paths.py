@@ -8,7 +8,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 
-_DEFAULT_WORKSPACE = Path.home() / ".openclaw" / "workspace"
+_DEFAULT_WORKSPACE = Path.home() / ".chronos" / "workspace"
+_LEGACY_OPENCLAW_WORKSPACE = Path.home() / ".openclaw" / "workspace"
 
 
 def _explicit_workspace_candidates() -> list[Path]:
@@ -22,7 +23,7 @@ def _explicit_workspace_candidates() -> list[Path]:
 
 def _workspace_candidates() -> list[Path]:
     candidates = _explicit_workspace_candidates()
-    candidates.extend([_DEFAULT_WORKSPACE, PROJECT_ROOT])
+    candidates.extend([_DEFAULT_WORKSPACE, _LEGACY_OPENCLAW_WORKSPACE, PROJECT_ROOT])
     return candidates
 
 

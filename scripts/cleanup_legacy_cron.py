@@ -2,6 +2,7 @@
 """Cleanup utility for legacy or orphaned Chronos cron jobs."""
 import argparse
 import json
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -73,6 +74,11 @@ def classify_jobs(jobs: list[dict], known_job_ids: set[str]) -> list[dict]:
 
 
 def load_cron_jobs() -> list[dict]:
+    if shutil.which(OPENCLAW_BIN) is None:
+        raise RuntimeError(
+            f"OpenClaw binary not found: {OPENCLAW_BIN}. "
+            "This cleanup tool is optional and only needed for legacy OpenClaw cron migration."
+        )
     result = subprocess.run(
         [OPENCLAW_BIN, "cron", "list", "--all", "--json"],
         capture_output=True,

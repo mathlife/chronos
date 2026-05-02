@@ -2,6 +2,8 @@
 
 Chronos is a lightweight recurring-task engine backed by `periodic_tasks` + `periodic_occurrences`, with temporary compatibility for legacy `entries` rows.
 
+Chronos runtime no longer requires `openclaw` for normal scheduling/notification flows. OpenClaw (or any external caller) can integrate through the JSON CLI API in `scripts/chronos_api.py`.
+
 ## Phase-1 data model direction
 
 - `periodic_tasks` is the canonical definition table for scheduled work.
@@ -17,6 +19,25 @@ Chronos is a lightweight recurring-task engine backed by `periodic_tasks` + `per
 ## Quick examples
 
 ```bash
+python3 skills/chronos/scripts/setup_config.py --interactive
+
+# Linux non-interactive bootstrap examples:
+# Telegram
+python3 skills/chronos/scripts/setup_config.py \
+  --channel telegram \
+  --channel-id tg-main \
+  --bot-token "<bot_token>" \
+  --chat-id "<chat_id>"
+
+# Webhook
+python3 skills/chronos/scripts/setup_config.py \
+  --channel webhook \
+  --channel-id hook-main \
+  --webhook-url "https://example.com/chronos-hook"
+
+# Optional: custom config location
+export CHRONOS_CONFIG_PATH="$HOME/.config/chronos/config.json"
+
 python3 skills/chronos/scripts/todo.py add "一次性计划任务" \
   --cycle-type once \
   --start-date 2026-03-27 \
@@ -50,6 +71,60 @@ python3 skills/chronos/scripts/normalize_historical_residues.py --db /home/ubunt
 python3 skills/chronos/scripts/todo.py complete-overdue --dry-run
 python3 skills/chronos/scripts/schema_preflight.py
 ```
+
+## Integration API (for OpenClaw callers)
+
+`scripts/chronos_api.py` provides machine-friendly JSON IO for task/channel management.
+
+```bash
+# List tasks
+python3 skills/chronos/scripts/chronos_api.py task list --active-only all
+
+# Create task
+python3 skills/chronos/scripts/chronos_api.py task create \
+  --payload '{"name":"每周例会","cycle_type":"weekly","weekday":0,"time_of_day":"10:00","task_kind":"scheduled"}'
+
+# Patch task
+python3 skills/chronos/scripts/chronos_api.py task update --id 12 \
+  --payload '{"delivery_target":"tg-main,hook-main"}'
+
+# Upsert notification channel
+python3 skills/chronos/scripts/chronos_api.py channel put \
+  --payload '{"id":"tg-main","type":"telegram","enabled":true,"config":{"bot_token":"<token>","chat_id":"<chat_id>"}}'
+
+# Remove channel
+python3 skills/chronos/scripts/chronos_api.py channel remove --id tg-main
+```
+
+All commands return a JSON object:
+- success: `{"ok": true, "data": ...}`
+- error: `{"ok": false, "error": "..."}`
+
+## Web Dashboard (query + manage)
+
+Chronos provides a built-in Web UI to view and manage settings/tasks.
+
+```bash
+# Linux local-only (default, no auth required)
+python3 skills/chronos/scripts/web_dashboard.py --host 127.0.0.1 --port 8765
+
+# Linux remote access (recommended: enable basic auth)
+python3 skills/chronos/scripts/web_dashboard.py \
+  --host 0.0.0.0 \
+  --port 8765 \
+  --basic-auth "admin:change-me-now"
+```
+
+Open in browser:
+- `http://127.0.0.1:8765/`
+
+Features:
+- Query: runtime config, channels, all periodic tasks, today's tasks
+- Manage: task create/update/remove (deactivate or hard delete), channel upsert/remove, legacy `chat_id` update
+
+Recommended deployment:
+- keep `--host 127.0.0.1` and expose through trusted reverse proxy when remote access is needed
+- when binding non-local host, set `--basic-auth user:password` (otherwise the server will refuse to start unless explicitly overridden with `--allow-unauthenticated-remote`)
 
 ## Hourly cadence semantics
 

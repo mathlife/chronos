@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - End-to-end reminder chain coverage for occurrence creation, reminder persistence, immediate reminder fallback, missing-config behavior, and cleanup.
 - `scripts/check_git_hygiene.sh` to fail fast when tracked `__pycache__` or `*.pyc` artifacts leak into the repo.
 - `core/openclaw_cron.py` helper to centralize OpenClaw cron add/remove command construction.
+- `core/integration_api.py` and `scripts/chronos_api.py` as JSON interfaces for external callers to manage periodic tasks and notification channels without relying on OpenClaw internals.
 - `scripts/schema_preflight.py` to verify the actual runtime DB, required tables, key constraints, duplicate occurrence groups, and invalid statuses before any schema migration.
 - `scripts/migrate_legacy_entries.py` for conservative Phase-2 migration of deterministic legacy recurring/system rows from `entries` into canonical task metadata.
 - `scripts/archive_legacy_entries.py` for the final conservative legacy cleanup step that marks migrated linked `entries` rows readonly+archived without deleting them.
@@ -19,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Reminder cron creation/removal now goes through a shared helper instead of duplicating argv construction.
+- Default workspace probing now prioritizes `~/.chronos/workspace` and keeps `~/.openclaw/workspace` as compatibility fallback.
 - README verification steps now include config diagnostics, schema preflight, full test discovery, legacy cron dry-run cleanup, legacy archive dry-run/apply, and git hygiene checks.
 - Phase-2 docs now document the conservative migration policy, including `legacy_entry_id` / `source` traceability and the deliberate refusal to auto-migrate unsupported cadences such as `每 4 小时 ...`.
 - Legacy archive handling now treats `entries.status='archived'` as the preferred first-class archive state when the schema allows it, while still honoring `chronos_archived_*` metadata as a backward-compatible fallback for constrained old schemas.

@@ -26,7 +26,9 @@ from core.legacy_archive import (
     get_entry_columns,
     legacy_archive_select_expressions,
 )
-from core.paths import OPENCLAW_BIN, PYTHON_BIN, SCRIPTS_DIR, TODO_DB, WORKSPACE
+from core.config import get_config_path
+from core.notifiers import dispatch_message
+from core.paths import PYTHON_BIN, SCRIPTS_DIR, TODO_DB, WORKSPACE
 from core.models import ALLOWED_CYCLE_TYPES
 from core.system_scheduler import remove_job
 from scripts.subagent_sync_ledger import looks_like_subagent_session
@@ -709,14 +711,8 @@ def complete_periodic_occurrence(
             update_sql += ",\n                " + ",\n                ".join(extra_assignments)
         update_sql += "\n            WHERE id = ?\n            "
         cur.execute(update_sql, (completion_mode, special_handler_result, *extra_params, occ_id))
-        if task_kind == 'system':
-            remove_job(reminder_job_id)
-            remove_job(execution_job_id)
-        elif reminder_job_id:
-            try:
-                subprocess.run([OPENCLAW_BIN, "cron", "remove", reminder_job_id], capture_output=True, text=True, timeout=10)
-            except Exception:
-                pass
+        remove_job(reminder_job_id)
+        remove_job(execution_job_id)
         if reminder_job_id or execution_job_id:
             cur.execute("UPDATE periodic_occurrences SET reminder_job_id = NULL, execution_job_id = NULL WHERE id = ?", (occ_id,))
         task_columns = {row[1] for row in cur.execute("PRAGMA table_info(periodic_tasks)").fetchall()}
@@ -764,14 +760,8 @@ def complete_periodic_occurrence(
                     (task_id, occurrence_date),
                 )
                 for quota_reminder_job_id, quota_execution_job_id, quota_task_kind in cur.fetchall():
-                    if quota_task_kind == 'system':
-                        remove_job(quota_reminder_job_id)
-                        remove_job(quota_execution_job_id)
-                    elif quota_reminder_job_id:
-                        try:
-                            subprocess.run([OPENCLAW_BIN, "cron", "remove", quota_reminder_job_id], capture_output=True, text=True, timeout=10)
-                        except Exception:
-                            pass
+                    remove_job(quota_reminder_job_id)
+                    remove_job(quota_execution_job_id)
                 cur.execute(
                     """
                     UPDATE periodic_occurrences
@@ -1148,20 +1138,9 @@ def cmd_skip(identifier):
                 (occ_id,),
             )
 
-            cur.execute(
-                "SELECT COALESCE(t.task_kind, 'scheduled') FROM periodic_occurrences o JOIN periodic_tasks t ON t.id = o.task_id WHERE o.id = ?",
-                (occ_id,),
-            )
-            task_kind = cur.fetchone()[0]
-            if task_kind == 'system':
-                if job_name:
-                    try:
-                        remove_job(job_name)
-                    except Exception:
-                        pass
-            elif job_name:
+            if job_name:
                 try:
-                    subprocess.run([OPENCLAW_BIN, "cron", "remove", job_name], capture_output=True, text=True, timeout=10)
+                    remove_job(job_name)
                 except Exception:
                     pass
             if execution_job_id:

@@ -1,4 +1,4 @@
-"""Helpers for constructing OpenClaw cron commands."""
+"""Legacy helpers for constructing OpenClaw cron commands."""
 from __future__ import annotations
 
 from typing import List
