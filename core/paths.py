@@ -24,7 +24,7 @@ def _explicit_workspace_candidates() -> list[Path]:
 
 def _workspace_candidates() -> list[Path]:
     candidates = _explicit_workspace_candidates()
-    candidates.extend([_PROJECT_LOCAL_WORKSPACE, _DEFAULT_WORKSPACE, PROJECT_ROOT])
+    candidates.extend([_PROJECT_LOCAL_WORKSPACE, _DEFAULT_WORKSPACE])
     return candidates
 
 
@@ -52,7 +52,7 @@ def resolve_workspace() -> Path:
         if candidate.exists():
             return candidate
 
-    return PROJECT_ROOT
+    return _PROJECT_LOCAL_WORKSPACE
 
 
 WORKSPACE = resolve_workspace()
