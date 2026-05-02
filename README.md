@@ -8,6 +8,7 @@ Chronos is a lightweight recurring-task engine backed by `periodic_tasks` + `per
 - `periodic_occurrences` is the canonical execution/reminder table.
 - `entries` remains only for inbox-style one-shot notes and legacy compatibility.
 - Scheduled `once` tasks with an explicit `start_date` now use canonical task storage.
+- `system` tasks can be materialized as OS-level scheduled jobs on Linux via `crontab`, instead of waiting for model-side reasoning loops.
 - `monthly_dates` is a supported cycle type.
 - `hourly` is a supported cycle type, with `interval_hours` + `time_of_day` anchor semantics.
 - `monthly_n_times` can now run on either a weekday cadence (`weekday=0..6`) or a daily cadence (`weekday=NULL`) while still enforcing a monthly completion quota.
@@ -34,6 +35,12 @@ python3 skills/chronos/scripts/todo.py add "Meta-Review fallback" \
   --task-kind system \
   --special-handler meta_review_fallback
 
+python3 skills/chronos/scripts/todo.py add "刷新本地缓存" \
+  --cycle-type daily \
+  --time 09:30 \
+  --task-kind system \
+  --system-command "powershell -NoProfile -File D:\\ops\\refresh-cache.ps1"
+
 python3 skills/chronos/scripts/migrate_legacy_entries.py --db /home/ubuntu/.openclaw/workspace/todo.db
 python3 skills/chronos/scripts/migrate_legacy_entries.py --db /home/ubuntu/.openclaw/workspace/todo.db --apply
 python3 skills/chronos/scripts/archive_legacy_entries.py --db /home/ubuntu/.openclaw/workspace/todo.db
@@ -59,6 +66,22 @@ Expansion rule for each active day:
   - `00:00, 04:00, 08:00, 12:00, 16:00, 20:00`
 
 This is conservative and matches the legacy `每 4 小时：同步 subagent 记忆` expectation without introducing cross-day offset state.
+
+## Task categories
+
+Chronos now has three user-facing scheduling categories:
+
+- `once`: a one-shot task with explicit `start_date`
+- `monthly_n_times`: complete up to `n_per_month` times within the month, optionally constrained by `weekday`
+- periodic tasks: `daily`, `hourly`, `weekly`, `monthly_fixed`, `monthly_range`, `monthly_dates`
+
+For command-style deterministic system work:
+
+- set `task_kind=system`
+- set `special_handler=run_command` implicitly via `--system-command`
+- Chronos creates OS scheduled jobs for the reminder and the execution on Linux via `crontab`
+- reminder fires 5 minutes before `scheduled_time`
+- once the due time is reached, the occurrence is marked `completed` directly instead of staying `pending`
 
 `sync_subagent_memory` now reads a file-backed ledger at `memory/subagent_sync_ledger.json` via `memory_manager.py pending-subagents`, so the hourly handler no longer guesses session ids from all memory. Ledger schema/status/pending semantics are centralized in `scripts/subagent_sync_ledger.py`, and OpenClaw auto-records completed subagent sessions into that ledger on the subagent completion path. `memory_manager.py record-subagent <session_id>` remains available only for manual backfill. Successful syncs are marked handled with `mark-subagent-synced`, and failures remain pending with an updated error trail.
 

@@ -7,8 +7,8 @@ SKILL_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(SKILL_DIR))
 
 import subprocess
+import json
 from datetime import datetime, timedelta, date
-from zoneinfo import ZoneInfo
 from typing import Optional
 
 from core.db import DB, db_commit, clear_task_cache, get_periodic_tasks, get_periodic_task
@@ -17,9 +17,13 @@ from core.learning import LearningContext
 from core.models import PeriodicTask, ALLOWED_CYCLE_TYPES
 from core.config import get_chat_id
 from core.openclaw_cron import build_cron_add_command, build_cron_remove_command
+from core.paths import PYTHON_BIN, SCRIPTS_DIR
+from core.system_scheduler import build_job_command, build_job_name, create_once_job, remove_job, supports_system_scheduler
+from core.timezones import get_shanghai_tz, get_utc_tz
 
 CYCLE_TYPES = list(ALLOWED_CYCLE_TYPES)
-SHANGHAI_TZ = ZoneInfo('Asia/Shanghai')
+SHANGHAI_TZ = get_shanghai_tz()
+UTC_TZ = get_utc_tz()
 
 
 def parse_time_of_day(value: str) -> str:
@@ -86,6 +90,10 @@ def validate_add_params(args: argparse.Namespace) -> None:
         raise ValueError("monthly_n_times tasks require --n-per-month")
     if args.cycle_type == 'monthly_dates' and not args.dates_list:
         raise ValueError("monthly_dates tasks require --dates-list")
+    if args.system_command and args.task_kind != 'system':
+        raise ValueError("--system-command requires --task-kind system")
+    if args.system_command and args.special_handler and args.special_handler != 'run_command':
+        raise ValueError("--system-command cannot be combined with another special_handler")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -94,6 +102,8 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--add", action="store_true", help="Add a periodic task")
     group.add_argument("--complete-activity", type=int, help="Complete activity by task id")
     group.add_argument("--ensure-today", action="store_true", help="Ensure today's occurrences")
+    group.add_argument("--fire-reminder", action="store_true", help="Fire a reminder for a scheduled occurrence")
+    group.add_argument("--run-system-task", action="store_true", help="Execute a due system occurrence and mark it completed")
 
     parser.add_argument("--name")
     parser.add_argument("--category", default="Inbox")
@@ -114,8 +124,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--legacy-entry-id", type=int)
     parser.add_argument("--special-handler")
     parser.add_argument("--handler-payload")
+    parser.add_argument("--system-command")
     parser.add_argument("--delivery-target")
     parser.add_argument("--delivery-mode")
+    parser.add_argument("--occurrence-id", type=int)
 
     return parser
 
@@ -206,6 +218,215 @@ class PeriodicTaskManager:
         row = cur.fetchone()
         return row[0] if row else None
 
+    def _get_occurrence_row(self, occurrence_id: int):
+        return self.db.execute(
+            """
+            SELECT o.id, o.task_id, o.date, o.status, o.reminder_job_id, o.execution_job_id, o.scheduled_time,
+                   t.name, t.task_kind, t.time_of_day, t.reminder_template, t.special_handler, t.handler_payload
+            FROM periodic_occurrences o
+            JOIN periodic_tasks t ON t.id = o.task_id
+            WHERE o.id = ?
+            """,
+            (occurrence_id,),
+        ).fetchone()
+
+    def _send_message_now(self, message_text: str) -> bool:
+        try:
+            chat_id = get_chat_id()
+        except ValueError as exc:
+            print(f"Chronos chat_id not configured: {exc}")
+            return False
+
+        now_utc = datetime.now(UTC_TZ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        try:
+            result = subprocess.run(
+                build_cron_add_command(
+                    job_name=f"chronos_immediate_{int(datetime.now(UTC_TZ).timestamp())}",
+                    at_iso=now_utc,
+                    message=message_text,
+                    chat_id=chat_id,
+                ),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"Failed to enqueue immediate message: {exc}")
+            return False
+        if result.returncode != 0:
+            print(f"Failed to enqueue immediate message: {result.stderr}")
+            return False
+        return True
+
+    def _mark_occurrence_reminded(self, occurrence_id: int, reminder_job_id: str | None = None) -> None:
+        self.db.execute(
+            """
+            UPDATE periodic_occurrences
+            SET status = CASE WHEN status = 'pending' THEN 'reminded' ELSE status END,
+                reminder_job_id = COALESCE(?, reminder_job_id)
+            WHERE id = ?
+            """,
+            (reminder_job_id, occurrence_id),
+        )
+        db_commit()
+
+    def _complete_occurrence_internal(
+        self,
+        occurrence_id: int,
+        *,
+        completion_mode: str,
+        special_handler_result: str | None = None,
+    ) -> bool:
+        cur = self.db.execute(
+            """
+            UPDATE periodic_occurrences
+            SET status = 'completed',
+                completed_at = CURRENT_TIMESTAMP,
+                completion_mode = ?,
+                special_handler_result = COALESCE(?, special_handler_result)
+            WHERE id = ? AND status != 'completed'
+            """,
+            (completion_mode, special_handler_result, occurrence_id),
+        )
+        if cur.rowcount <= 0:
+            return False
+        db_commit()
+        cur = self.db.execute("SELECT task_id FROM periodic_occurrences WHERE id = ?", (occurrence_id,))
+        row = cur.fetchone()
+        if row:
+            task_id = row[0]
+            cycle_type_row = self.db.execute(
+                "SELECT cycle_type, n_per_month, count_current_month FROM periodic_tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if cycle_type_row and cycle_type_row[0] == 'monthly_n_times':
+                self.db.execute("UPDATE periodic_tasks SET count_current_month = count_current_month + 1 WHERE id = ?", (task_id,))
+                n_per_month = cycle_type_row[1]
+                current_count = cycle_type_row[2] or 0
+                if n_per_month is not None and current_count + 1 >= n_per_month:
+                    self.db.execute(
+                        """
+                        UPDATE periodic_occurrences
+                        SET status = 'completed', is_auto_completed = 1,
+                            completion_mode = COALESCE(completion_mode, 'auto_quota')
+                        WHERE task_id = ? AND status IN ('pending', 'reminded')
+                          AND strftime('%Y-%m', date) = strftime('%Y-%m', 'now', 'localtime')
+                        """,
+                        (task_id,),
+                    )
+                    cleanup_rows = self.db.execute(
+                        """
+                        SELECT reminder_job_id, execution_job_id
+                        FROM periodic_occurrences
+                        WHERE task_id = ? AND status = 'completed'
+                          AND strftime('%Y-%m', date) = strftime('%Y-%m', 'now', 'localtime')
+                          AND (reminder_job_id IS NOT NULL OR execution_job_id IS NOT NULL)
+                        """,
+                        (task_id,),
+                    ).fetchall()
+                    for reminder_job_name, execution_job_name in cleanup_rows:
+                        if reminder_job_name:
+                            remove_job(reminder_job_name)
+                            try:
+                                subprocess.run(build_cron_remove_command(reminder_job_name), capture_output=True, text=True, timeout=10)
+                            except Exception:
+                                pass
+                        if execution_job_name:
+                            remove_job(execution_job_name)
+                    self.db.execute(
+                        """
+                        UPDATE periodic_occurrences
+                        SET reminder_job_id = NULL, execution_job_id = NULL
+                        WHERE task_id = ? AND status = 'completed'
+                          AND strftime('%Y-%m', date) = strftime('%Y-%m', 'now', 'localtime')
+                        """,
+                        (task_id,),
+                    )
+                db_commit()
+        return True
+
+    def _parse_system_command(self, handler_payload: Optional[str]) -> Optional[str]:
+        if not handler_payload:
+            return None
+        try:
+            payload = json.loads(handler_payload)
+        except json.JSONDecodeError:
+            return handler_payload.strip() or None
+        if isinstance(payload, dict):
+            command = payload.get('command') or payload.get('system_command')
+            return str(command).strip() if command else None
+        if isinstance(payload, str):
+            return payload.strip() or None
+        return None
+
+    def _schedule_system_occurrence_jobs(self, occurrence_id: int, occ_date: date, time_of_day: str) -> tuple[Optional[str], Optional[str]]:
+        if not supports_system_scheduler():
+            raise RuntimeError("system scheduler is not supported on this platform")
+        hour, minute = map(int, time_of_day.split(':'))
+        execute_at = datetime(occ_date.year, occ_date.month, occ_date.day, hour, minute, tzinfo=SHANGHAI_TZ)
+        reminder_at = execute_at - timedelta(minutes=5)
+        reminder_job_name = build_job_name("reminder", occurrence_id)
+        execute_job_name = build_job_name("execute", occurrence_id)
+        script_path = SCRIPTS_DIR / "periodic_task_manager.py"
+
+        if reminder_at > datetime.now(SHANGHAI_TZ):
+            reminder_command = build_job_command(PYTHON_BIN, script_path, "--fire-reminder", occurrence_id)
+            create_once_job(job_name=reminder_job_name, command=reminder_command, run_at=reminder_at)
+        else:
+            reminder_job_name = None
+
+        execute_command = build_job_command(PYTHON_BIN, script_path, "--run-system-task", occurrence_id)
+        create_once_job(job_name=execute_job_name, command=execute_command, run_at=execute_at)
+        return reminder_job_name, execute_job_name
+
+    def fire_reminder_occurrence(self, occurrence_id: int) -> bool:
+        row = self._get_occurrence_row(occurrence_id)
+        if not row or row["status"] in ("completed", "skipped"):
+            return False
+        occ_date = date.fromisoformat(row["date"])
+        time_of_day = row["scheduled_time"] or row["time_of_day"]
+        if not time_of_day:
+            return False
+        message_text = self._format_reminder_message(row["name"], occ_date, time_of_day, row["reminder_template"], immediate=False)
+        if not self._send_message_now(message_text):
+            return False
+        self._mark_occurrence_reminded(occurrence_id, reminder_job_id=row["reminder_job_id"])
+        return True
+
+    def run_system_occurrence(self, occurrence_id: int) -> bool:
+        row = self._get_occurrence_row(occurrence_id)
+        if not row or row["status"] in ("completed", "skipped"):
+            return False
+        if row["task_kind"] != "system":
+            return False
+
+        result_message = None
+        if row["special_handler"] == "run_command":
+            command = self._parse_system_command(row["handler_payload"])
+            if not command:
+                result_message = "system command task had no runnable command; marked completed"
+            else:
+                completed = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=600)
+                summary = (completed.stdout or completed.stderr or "").strip()
+                summary = summary[:500] if summary else ""
+                result_message = f"command={command}; exit_code={completed.returncode}"
+                if summary:
+                    result_message = f"{result_message}; output={summary}"
+        else:
+            result_message = f"system occurrence reached due time for task {row['name']}"
+
+        self._complete_occurrence_internal(
+            occurrence_id,
+            completion_mode="system_scheduler",
+            special_handler_result=result_message,
+        )
+        self.db.execute(
+            "UPDATE periodic_occurrences SET reminder_job_id = NULL, execution_job_id = NULL WHERE id = ?",
+            (occurrence_id,),
+        )
+        db_commit()
+        return True
+
     def schedule_reminder_cron(self, task_id: int, occ_date: date, time_of_day: str) -> Optional[str]:
         cur = self.db.execute(
             "SELECT name, reminder_template FROM periodic_tasks WHERE id = ?",
@@ -235,9 +456,9 @@ class PeriodicTaskManager:
                 reminder_date = occ_date - timedelta(days=1)
 
         dt_shanghai = datetime(reminder_date.year, reminder_date.month, reminder_date.day, reminder_hour, reminder_minute, tzinfo=SHANGHAI_TZ)
-        utc_dt = dt_shanghai.astimezone(ZoneInfo('UTC'))
+        utc_dt = dt_shanghai.astimezone(UTC_TZ)
 
-        now_utc = datetime.now(ZoneInfo('UTC'))
+        now_utc = datetime.now(UTC_TZ)
         if utc_dt <= now_utc:
             message_text = self._format_reminder_message(task_name, occ_date, time_of_day, reminder_template, immediate=True)
             immediate_job_name = f"reminder_immediate_{task_id}_{occ_date.strftime('%Y%m%d')}_{time_of_day.replace(':', '')}"
@@ -303,13 +524,25 @@ class PeriodicTaskManager:
                 if not occ_id:
                     continue
 
-                cur = self.db.execute("SELECT status, reminder_job_id FROM periodic_occurrences WHERE id = ?", (occ_id,))
-                status, job_name = cur.fetchone()
+                cur = self.db.execute("SELECT status, reminder_job_id, execution_job_id FROM periodic_occurrences WHERE id = ?", (occ_id,))
+                status, job_name, execution_job_id = cur.fetchone()
                 if status not in ('pending', 'reminded'):
                     continue
                 if task.cycle_type == 'once' and task.start_date and task.start_date != today.isoformat():
                     continue
                 if getattr(task, 'task_kind', 'scheduled') == 'system':
+                    if not execution_job_id and schedule_time:
+                        try:
+                            reminder_job_name, execution_job_name = self._schedule_system_occurrence_jobs(occ_id, today, schedule_time)
+                        except Exception as exc:
+                            print(f"Failed to schedule system jobs for occurrence {occ_id}: {exc}")
+                            continue
+                        self.db.execute(
+                            "UPDATE periodic_occurrences SET reminder_job_id = COALESCE(?, reminder_job_id), execution_job_id = ? WHERE id = ?",
+                            (reminder_job_name, execution_job_name, occ_id),
+                        )
+                        db_commit()
+                        scheduled += 1
                     continue
                 if not job_name:
                     job_name = self.schedule_reminder_cron(task.id, today, schedule_time)
@@ -323,66 +556,44 @@ class PeriodicTaskManager:
     def cleanup_old_jobs(self, before_date: date) -> int:
         cur = self.db.execute(
             """
-            SELECT o.id, o.reminder_job_id
+            SELECT o.id, o.reminder_job_id, o.execution_job_id, t.task_kind
             FROM periodic_occurrences o
-            WHERE o.date <= ? AND o.reminder_job_id IS NOT NULL
+            JOIN periodic_tasks t ON t.id = o.task_id
+            WHERE o.date <= ?
+              AND (o.reminder_job_id IS NOT NULL OR o.execution_job_id IS NOT NULL)
             """,
             (before_date.isoformat(),),
         )
         jobs = cur.fetchall()
 
         cleaned = 0
-        for occ_id, job_name in jobs:
+        for occ_id, reminder_job_name, execution_job_name, task_kind in jobs:
+            reminder_removed = False
+            execution_removed = False
             try:
-                result = subprocess.run(build_cron_remove_command(job_name), capture_output=True, text=True, timeout=10)
-                if result.returncode == 0:
-                    self.db.execute("UPDATE periodic_occurrences SET reminder_job_id = NULL WHERE id = ?", (occ_id,))
+                if task_kind == 'system':
+                    reminder_removed = remove_job(reminder_job_name)
+                    execution_removed = remove_job(execution_job_name)
+                else:
+                    result = subprocess.run(build_cron_remove_command(reminder_job_name), capture_output=True, text=True, timeout=10)
+                    reminder_removed = result.returncode == 0
+                if reminder_removed or execution_removed:
+                    self.db.execute(
+                        "UPDATE periodic_occurrences SET reminder_job_id = NULL, execution_job_id = NULL WHERE id = ?",
+                        (occ_id,),
+                    )
                     cleaned += 1
             except subprocess.TimeoutExpired:
-                print(f"Timeout removing cron job {job_name}")
+                print(f"Timeout removing scheduled jobs for occurrence {occ_id}")
             except Exception as e:
-                print(f"Error removing cron job {job_name}: {e}")
+                print(f"Error removing scheduled jobs for occurrence {occ_id}: {e}")
 
         db_commit()
         return cleaned
 
     def complete_occurrence(self, occurrence_id: int) -> bool:
         with LearningContext("complete_occurrence", f"Complete occurrence {occurrence_id}", confidence="H"):
-            cur = self.db.execute(
-                """
-                UPDATE periodic_occurrences
-                SET status = 'completed', completed_at = CURRENT_TIMESTAMP,
-                    completion_mode = COALESCE(completion_mode, 'manual')
-                WHERE id = ? AND status != 'completed'
-                """,
-                (occurrence_id,),
-            )
-            affected = cur.rowcount
-            if affected > 0:
-                db_commit()
-                cur = self.db.execute("SELECT task_id FROM periodic_occurrences WHERE id = ?", (occurrence_id,))
-                row = cur.fetchone()
-                if row:
-                    task_id = row[0]
-                    cur = self.db.execute("SELECT cycle_type, n_per_month, count_current_month FROM periodic_tasks WHERE id = ?", (task_id,))
-                    cycle_type_row = cur.fetchone()
-                    if cycle_type_row and cycle_type_row[0] == 'monthly_n_times':
-                        self.db.execute("UPDATE periodic_tasks SET count_current_month = count_current_month + 1 WHERE id = ?", (task_id,))
-                        n_per_month = cycle_type_row[1]
-                        current_count = (cycle_type_row[2] or 0)
-                        if n_per_month is not None and current_count + 1 >= n_per_month:
-                            self.db.execute(
-                                """
-                                UPDATE periodic_occurrences
-                                SET status = 'completed', is_auto_completed = 1,
-                                    completion_mode = COALESCE(completion_mode, 'auto_quota')
-                                WHERE task_id = ? AND status IN ('pending', 'reminded')
-                                  AND strftime('%Y-%m', date) = strftime('%Y-%m', 'now', 'localtime')
-                                """,
-                                (task_id,),
-                            )
-                        db_commit()
-            return affected > 0
+            return self._complete_occurrence_internal(occurrence_id, completion_mode='manual')
 
     def complete_activity_cycle(self, task_id: int, as_of: Optional[date] = None) -> int:
         with LearningContext("complete_activity_cycle", f"Complete all pending for task {task_id} up to today", confidence="H"):
@@ -426,17 +637,28 @@ class PeriodicTaskManager:
 
             cur = self.db.execute(
                 """
-                SELECT reminder_job_id FROM periodic_occurrences
-                WHERE task_id = ? AND reminder_job_id IS NOT NULL
+                SELECT reminder_job_id, execution_job_id, COALESCE(t.task_kind, 'scheduled')
+                FROM periodic_occurrences o
+                JOIN periodic_tasks t ON t.id = o.task_id
+                WHERE o.task_id = ? AND (o.reminder_job_id IS NOT NULL OR o.execution_job_id IS NOT NULL)
                 """,
                 (task_id,),
             )
-            job_names = [row[0] for row in cur.fetchall()]
-            for job_name in job_names:
+            jobs = cur.fetchall()
+            for reminder_job_name, execution_job_name, task_kind in jobs:
                 try:
-                    subprocess.run(build_cron_remove_command(job_name), capture_output=True, text=True, timeout=10)
+                    if task_kind == 'system':
+                        remove_job(reminder_job_name)
+                        remove_job(execution_job_name)
+                    elif reminder_job_name:
+                        subprocess.run(build_cron_remove_command(reminder_job_name), capture_output=True, text=True, timeout=10)
                 except Exception:
                     pass
+            self.db.execute(
+                "UPDATE periodic_occurrences SET reminder_job_id = NULL, execution_job_id = NULL WHERE task_id = ?",
+                (task_id,),
+            )
+            db_commit()
 
             return affected
 
@@ -475,8 +697,25 @@ class PeriodicTaskManager:
             schedule_times = scheduler.get_hourly_schedule_for_day(today) if task.cycle_type == 'hourly' else [task.time_of_day]
             for schedule_time in schedule_times:
                 occ_id = self.create_occurrence_if_missing(task.id, today, scheduled_time=schedule_time)
-                if occ_id:
-                    count += 1
+                if not occ_id:
+                    continue
+                if getattr(task, 'task_kind', 'scheduled') == 'system' and schedule_time:
+                    row = self.db.execute(
+                        "SELECT execution_job_id FROM periodic_occurrences WHERE id = ?",
+                        (occ_id,),
+                    ).fetchone()
+                    execution_job_id = row[0] if row else None
+                    if not execution_job_id:
+                        try:
+                            reminder_job_name, execution_job_name = self._schedule_system_occurrence_jobs(occ_id, today, schedule_time)
+                            self.db.execute(
+                                "UPDATE periodic_occurrences SET reminder_job_id = COALESCE(?, reminder_job_id), execution_job_id = ? WHERE id = ?",
+                                (reminder_job_name, execution_job_name, occ_id),
+                            )
+                            db_commit()
+                        except Exception as exc:
+                            print(f"Failed to ensure system jobs for occurrence {occ_id}: {exc}")
+                count += 1
 
         return count
 
@@ -576,7 +815,7 @@ class PeriodicTaskManager:
             print(f"Chronos chat_id not configured for todo snapshot: {exc}")
             return False
 
-        now_utc = datetime.now(ZoneInfo('UTC')).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        now_utc = datetime.now(UTC_TZ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         message_text = self._build_today_todo_snapshot(today)
         job_name = f"todo_snapshot_{today.strftime('%Y%m%d')}"
         try:
@@ -654,6 +893,9 @@ def main():
                 params['special_handler'] = args.special_handler
             if args.handler_payload is not None:
                 params['handler_payload'] = args.handler_payload
+            if args.system_command is not None:
+                params['special_handler'] = 'run_command'
+                params['handler_payload'] = json.dumps({'command': args.system_command}, ensure_ascii=False)
             if args.delivery_target is not None:
                 params['delivery_target'] = args.delivery_target
             if args.delivery_mode is not None:
@@ -661,6 +903,18 @@ def main():
 
             activity_id = manager.add_activity(**params)
             print(f"✅ Added task {activity_id}: {params.get('name')}")
+        elif args.fire_reminder:
+            if args.occurrence_id is None:
+                print("Missing required --occurrence-id for --fire-reminder")
+                sys.exit(2)
+            ok = manager.fire_reminder_occurrence(args.occurrence_id)
+            print(f"Reminder fired: {ok}")
+        elif args.run_system_task:
+            if args.occurrence_id is None:
+                print("Missing required --occurrence-id for --run-system-task")
+                sys.exit(2)
+            ok = manager.run_system_occurrence(args.occurrence_id)
+            print(f"System occurrence executed: {ok}")
 
         elif args.complete_activity is not None:
             affected = manager.complete_activity_cycle(args.complete_activity)

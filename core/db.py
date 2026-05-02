@@ -29,6 +29,7 @@ OCCURRENCE_SCHEMA_COLUMNS = {
     'scheduled_time': "ALTER TABLE periodic_occurrences ADD COLUMN scheduled_time TEXT",
     'scheduled_at': "ALTER TABLE periodic_occurrences ADD COLUMN scheduled_at TEXT",
     'legacy_entry_id': "ALTER TABLE periodic_occurrences ADD COLUMN legacy_entry_id INTEGER",
+    'execution_job_id': "ALTER TABLE periodic_occurrences ADD COLUMN execution_job_id TEXT",
 }
 
 
@@ -128,6 +129,7 @@ def _rebuild_occurrences_for_hourly(db: DB) -> None:
         return
 
     db.execute("ALTER TABLE periodic_occurrences RENAME TO periodic_occurrences_old")
+    old_columns = {row[1] for row in db.execute("PRAGMA table_info(periodic_occurrences_old)").fetchall()}
     db.execute(
         """
         CREATE TABLE periodic_occurrences (
@@ -136,6 +138,7 @@ def _rebuild_occurrences_for_hourly(db: DB) -> None:
             date TEXT NOT NULL,
             status TEXT DEFAULT 'pending',
             reminder_job_id TEXT,
+            execution_job_id TEXT,
             is_auto_completed BOOLEAN DEFAULT 0,
             completed_at TEXT,
             completion_mode TEXT,
@@ -148,14 +151,15 @@ def _rebuild_occurrences_for_hourly(db: DB) -> None:
         )
         """
     )
+    execution_job_id_expr = "execution_job_id" if "execution_job_id" in old_columns else "NULL AS execution_job_id"
     db.execute(
-        """
+        f"""
         INSERT INTO periodic_occurrences (
-            id, task_id, date, status, reminder_job_id, is_auto_completed, completed_at,
+            id, task_id, date, status, reminder_job_id, execution_job_id, is_auto_completed, completed_at,
             completion_mode, special_handler_result, scheduled_time, scheduled_at, legacy_entry_id
         )
         SELECT
-            id, task_id, date, status, reminder_job_id, COALESCE(is_auto_completed, 0), completed_at,
+            id, task_id, date, status, reminder_job_id, {execution_job_id_expr}, COALESCE(is_auto_completed, 0), completed_at,
             completion_mode, special_handler_result, scheduled_time, scheduled_at, legacy_entry_id
         FROM periodic_occurrences_old
         """

@@ -13,7 +13,7 @@ from core.models import ALLOWED_CYCLE_TYPES
 ALLOWED_OCCURRENCE_STATUSES = {"pending", "completed", "skipped", "reminded"}
 REQUIRED_TABLES = {"periodic_tasks", "periodic_occurrences"}
 REQUIRED_TASK_COLUMNS = {"task_kind", "source", "special_handler", "start_date", "delivery_target", "delivery_mode", "interval_hours"}
-REQUIRED_OCCURRENCE_COLUMNS = {"completion_mode", "special_handler_result", "scheduled_time", "scheduled_at"}
+REQUIRED_OCCURRENCE_COLUMNS = {"completion_mode", "special_handler_result", "scheduled_time", "scheduled_at", "execution_job_id"}
 
 
 def get_table_names(conn: sqlite3.Connection) -> set[str]:

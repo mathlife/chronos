@@ -66,6 +66,7 @@ class PeriodicOccurrence:
     date: date
     status: str = 'pending'  # pending|reminded|completed|skipped
     reminder_job_id: Optional[str] = None
+    execution_job_id: Optional[str] = None
     is_auto_completed: bool = False
     completed_at: Optional[str] = None
     completion_mode: Optional[str] = None

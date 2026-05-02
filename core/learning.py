@@ -1,11 +1,11 @@
 """Double-Loop Learning integration."""
 import subprocess
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from .paths import PYTHON_BIN, get_prediction_logger_path
+from .timezones import get_shanghai_tz
 
-SHANGHAI_TZ = ZoneInfo('Asia/Shanghai')
+SHANGHAI_TZ = get_shanghai_tz()
 
 def now_shanghai() -> datetime:
     return datetime.now(SHANGHAI_TZ)

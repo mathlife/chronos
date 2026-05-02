@@ -2,12 +2,12 @@
 import calendar
 from datetime import datetime, timedelta, date
 from typing import List, Optional, Tuple
-from zoneinfo import ZoneInfo
 from functools import lru_cache
 
 from .models import PeriodicTask
+from .timezones import get_shanghai_tz
 
-SHANGHAI_TZ = ZoneInfo('Asia/Shanghai')
+SHANGHAI_TZ = get_shanghai_tz()
 
 
 def to_shanghai_date(dt: Optional[datetime] = None) -> date:

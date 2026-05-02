@@ -28,6 +28,7 @@ from core.legacy_archive import (
 )
 from core.paths import OPENCLAW_BIN, PYTHON_BIN, SCRIPTS_DIR, TODO_DB, WORKSPACE
 from core.models import ALLOWED_CYCLE_TYPES
+from core.system_scheduler import remove_job
 from scripts.subagent_sync_ledger import looks_like_subagent_session
 
 MANAGER_SCRIPT = SCRIPTS_DIR / 'periodic_task_manager.py'
@@ -103,6 +104,10 @@ def validate_add_args(args: argparse.Namespace) -> None:
         raise ValueError("monthly_n_times tasks require --n-per-month")
     if args.cycle_type == 'monthly_dates' and not args.dates_list:
         raise ValueError("monthly_dates tasks require --dates-list")
+    if args.system_command and args.task_kind != 'system':
+        raise ValueError("--system-command requires --task-kind system")
+    if args.system_command and args.special_handler and args.special_handler != 'run_command':
+        raise ValueError("--system-command cannot be combined with another special_handler")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -130,6 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.add_argument("--task-kind", default="scheduled")
     add_parser.add_argument("--special-handler")
     add_parser.add_argument("--handler-payload")
+    add_parser.add_argument("--system-command")
 
     complete_parser = subparsers.add_parser("complete", help="Complete a task")
     complete_parser.add_argument("identifier")
@@ -587,6 +593,31 @@ def run_sync_subagent_memory(handler_payload: str | None, now: datetime | None =
     return True, note
 
 
+def run_system_command(handler_payload: str | None) -> tuple[bool, str]:
+    if not handler_payload:
+        return True, "system command task had no command payload"
+    try:
+        payload = json.loads(handler_payload)
+    except json.JSONDecodeError:
+        payload = handler_payload
+
+    command = None
+    if isinstance(payload, dict):
+        command = payload.get('command') or payload.get('system_command')
+    elif isinstance(payload, str):
+        command = payload
+
+    if not command or not str(command).strip():
+        return True, "system command task had no command payload"
+
+    result = subprocess.run(str(command), shell=True, capture_output=True, text=True, timeout=600)
+    output = (result.stdout or result.stderr or '').strip()
+    message = f"command={command}; exit_code={result.returncode}"
+    if output:
+        message = f"{message}; output={output[:500]}"
+    return result.returncode == 0, message
+
+
 def run_special_handler(handler_name: str | None, handler_payload: str | None, task_text: str, now: datetime | None = None) -> tuple[bool, str]:
     if not handler_name:
         return True, ''
@@ -594,6 +625,8 @@ def run_special_handler(handler_name: str | None, handler_payload: str | None, t
         return run_meta_review_fallback(task_text, now=now)
     if handler_name == 'sync_subagent_memory':
         return run_sync_subagent_memory(handler_payload, now=now)
+    if handler_name == 'run_command':
+        return run_system_command(handler_payload)
     return False, f"❌ 不支持的 special_handler: {handler_name}"
 
 
@@ -634,7 +667,7 @@ def complete_periodic_occurrence(
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT o.task_id, o.status, COALESCE(t.task_kind, 'scheduled'), o.date
+            SELECT o.task_id, o.status, COALESCE(t.task_kind, 'scheduled'), o.date, o.reminder_job_id, o.execution_job_id
             FROM periodic_occurrences o
             JOIN periodic_tasks t ON o.task_id = t.id
             WHERE o.id = ?
@@ -645,7 +678,7 @@ def complete_periodic_occurrence(
         if not row:
             return False, f"❌ 未找到 FIN-{occ_id}"
 
-        task_id, current_status, task_kind, occurrence_date = row
+        task_id, current_status, task_kind, occurrence_date, reminder_job_id, execution_job_id = row
         if current_status == 'skipped':
             return False, f"❌ 无法完成已跳过的任务 FIN-{occ_id}"
         if current_status == 'completed':
@@ -676,6 +709,16 @@ def complete_periodic_occurrence(
             update_sql += ",\n                " + ",\n                ".join(extra_assignments)
         update_sql += "\n            WHERE id = ?\n            "
         cur.execute(update_sql, (completion_mode, special_handler_result, *extra_params, occ_id))
+        if task_kind == 'system':
+            remove_job(reminder_job_id)
+            remove_job(execution_job_id)
+        elif reminder_job_id:
+            try:
+                subprocess.run([OPENCLAW_BIN, "cron", "remove", reminder_job_id], capture_output=True, text=True, timeout=10)
+            except Exception:
+                pass
+        if reminder_job_id or execution_job_id:
+            cur.execute("UPDATE periodic_occurrences SET reminder_job_id = NULL, execution_job_id = NULL WHERE id = ?", (occ_id,))
         task_columns = {row[1] for row in cur.execute("PRAGMA table_info(periodic_tasks)").fetchall()}
         select_columns = ['cycle_type']
         if 'n_per_month' in task_columns:
@@ -709,6 +752,35 @@ def complete_periodic_occurrence(
                       AND strftime('%Y-%m', date) = strftime('%Y-%m', ?)
                 """
                 cur.execute(quota_sql, tuple(quota_params))
+                cur.execute(
+                    """
+                    SELECT reminder_job_id, execution_job_id, COALESCE(t.task_kind, 'scheduled')
+                    FROM periodic_occurrences o
+                    JOIN periodic_tasks t ON t.id = o.task_id
+                    WHERE o.task_id = ? AND o.status = 'completed'
+                      AND strftime('%Y-%m', o.date) = strftime('%Y-%m', ?)
+                      AND (o.reminder_job_id IS NOT NULL OR o.execution_job_id IS NOT NULL)
+                    """,
+                    (task_id, occurrence_date),
+                )
+                for quota_reminder_job_id, quota_execution_job_id, quota_task_kind in cur.fetchall():
+                    if quota_task_kind == 'system':
+                        remove_job(quota_reminder_job_id)
+                        remove_job(quota_execution_job_id)
+                    elif quota_reminder_job_id:
+                        try:
+                            subprocess.run([OPENCLAW_BIN, "cron", "remove", quota_reminder_job_id], capture_output=True, text=True, timeout=10)
+                        except Exception:
+                            pass
+                cur.execute(
+                    """
+                    UPDATE periodic_occurrences
+                    SET reminder_job_id = NULL, execution_job_id = NULL
+                    WHERE task_id = ? AND status = 'completed'
+                      AND strftime('%Y-%m', date) = strftime('%Y-%m', ?)
+                    """,
+                    (task_id, occurrence_date),
+                )
 
         conn.commit()
     finally:
@@ -986,6 +1058,8 @@ def cmd_add(text, category='Inbox', cycle_type='once', **kwargs):
             args.extend(['--special-handler', kwargs['special_handler']])
         if 'handler_payload' in kwargs and kwargs['handler_payload']:
             args.extend(['--handler-payload', kwargs['handler_payload']])
+        if 'system_command' in kwargs and kwargs['system_command']:
+            args.extend(['--system-command', kwargs['system_command']])
 
         result = subprocess.run(args, capture_output=True, text=True)
         if result.returncode == 0:
@@ -1062,8 +1136,8 @@ def cmd_skip(identifier):
                 conn.close()
                 return
 
-            cur.execute("SELECT status, reminder_job_id FROM periodic_occurrences WHERE id = ?", (occ_id,))
-            current_status, job_name = cur.fetchone()
+            cur.execute("SELECT status, reminder_job_id, execution_job_id FROM periodic_occurrences WHERE id = ?", (occ_id,))
+            current_status, job_name, execution_job_id = cur.fetchone()
             if current_status == 'skipped':
                 print(f"⚠️  FIN-{occ_id} 已经是跳过状态")
                 conn.close()
@@ -1074,11 +1148,29 @@ def cmd_skip(identifier):
                 (occ_id,),
             )
 
-            if job_name:
+            cur.execute(
+                "SELECT COALESCE(t.task_kind, 'scheduled') FROM periodic_occurrences o JOIN periodic_tasks t ON t.id = o.task_id WHERE o.id = ?",
+                (occ_id,),
+            )
+            task_kind = cur.fetchone()[0]
+            if task_kind == 'system':
+                if job_name:
+                    try:
+                        remove_job(job_name)
+                    except Exception:
+                        pass
+            elif job_name:
                 try:
                     subprocess.run([OPENCLAW_BIN, "cron", "remove", job_name], capture_output=True, text=True, timeout=10)
                 except Exception:
                     pass
+            if execution_job_id:
+                try:
+                    remove_job(execution_job_id)
+                except Exception:
+                    pass
+            if job_name or execution_job_id:
+                cur.execute("UPDATE periodic_occurrences SET reminder_job_id = NULL, execution_job_id = NULL WHERE id = ?", (occ_id,))
 
             conn.commit()
             conn.close()
@@ -1123,7 +1215,7 @@ def cmd_show(identifier):
         cur.execute(
             """
             SELECT t.name, t.cycle_type, t.special_handler, o.date, o.status,
-                   o.reminder_job_id, o.completion_mode, o.special_handler_result, o.scheduled_time,
+                   o.reminder_job_id, o.execution_job_id, o.completion_mode, o.special_handler_result, o.scheduled_time,
                    o.completion_source, o.trigger_label, o.trigger_command
             FROM periodic_occurrences o
             JOIN periodic_tasks t ON o.task_id = t.id
@@ -1134,7 +1226,7 @@ def cmd_show(identifier):
         row = cur.fetchone()
         conn.close()
         if row:
-            name, cycle_type, special_handler, date_str, status, job_id, completion_mode, special_handler_result, scheduled_time, completion_source, trigger_label, trigger_command = row
+            name, cycle_type, special_handler, date_str, status, job_id, execution_job_id, completion_mode, special_handler_result, scheduled_time, completion_source, trigger_label, trigger_command = row
             print(f"【周期任务】{name}")
             print(f"周期类型：{cycle_type}")
             print(f"日期：{date_str}")
@@ -1147,6 +1239,7 @@ def cmd_show(identifier):
             print(f"trigger_command：{trigger_command or '无'}")
             print(f"handler_result：{special_handler_result or '无'}")
             print(f"提醒任务：{job_id or '无'}")
+            print(f"执行任务：{execution_job_id or '无'}")
         else:
             print(f"❌ 未找到 FIN-{occ_id}")
     else:
@@ -1253,6 +1346,8 @@ def main():
                 kwargs['special_handler'] = args.special_handler
             if args.handler_payload is not None:
                 kwargs['handler_payload'] = args.handler_payload
+            if args.system_command is not None:
+                kwargs['system_command'] = args.system_command
 
             cmd_add(args.name, **kwargs)
         elif args.command == 'skip':
