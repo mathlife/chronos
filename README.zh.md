@@ -36,7 +36,7 @@ python3 skills/chronos/scripts/setup_config.py \
   --webhook-url "https://example.com/chronos-hook"
 
 # 可选：自定义配置路径
-export CHRONOS_CONFIG_PATH="$HOME/.config/chronos/config.json"
+export CHRONOS_CONFIG_PATH="$(pwd)/.Chonos/config/config.json"
 
 python3 skills/chronos/scripts/todo.py add "一次性计划任务" \
   --cycle-type once \
@@ -62,12 +62,12 @@ python3 skills/chronos/scripts/todo.py add "刷新本地缓存" \
   --task-kind system \
   --system-command "powershell -NoProfile -File D:\\ops\\refresh-cache.ps1"
 
-python3 skills/chronos/scripts/migrate_legacy_entries.py --db "$(pwd)/.Chonos/todo.db"
-python3 skills/chronos/scripts/migrate_legacy_entries.py --db "$(pwd)/.Chonos/todo.db" --apply
-python3 skills/chronos/scripts/archive_legacy_entries.py --db "$(pwd)/.Chonos/todo.db"
-python3 skills/chronos/scripts/archive_legacy_entries.py --db "$(pwd)/.Chonos/todo.db" --apply
-python3 skills/chronos/scripts/normalize_historical_residues.py --db "$(pwd)/.Chonos/todo.db"
-python3 skills/chronos/scripts/normalize_historical_residues.py --db "$(pwd)/.Chonos/todo.db" --apply
+python3 skills/chronos/scripts/migrate_legacy_entries.py --db "$(pwd)/.Chonos/config/todo.db"
+python3 skills/chronos/scripts/migrate_legacy_entries.py --db "$(pwd)/.Chonos/config/todo.db" --apply
+python3 skills/chronos/scripts/archive_legacy_entries.py --db "$(pwd)/.Chonos/config/todo.db"
+python3 skills/chronos/scripts/archive_legacy_entries.py --db "$(pwd)/.Chonos/config/todo.db" --apply
+python3 skills/chronos/scripts/normalize_historical_residues.py --db "$(pwd)/.Chonos/config/todo.db"
+python3 skills/chronos/scripts/normalize_historical_residues.py --db "$(pwd)/.Chonos/config/todo.db" --apply
 python3 skills/chronos/scripts/todo.py complete-overdue --dry-run
 python3 skills/chronos/scripts/schema_preflight.py
 ```
@@ -240,12 +240,12 @@ Phase 2+ 引入 `scripts/migrate_legacy_entries.py`，以保守策略将任务�
 
 推荐执行顺序：
 
-1. `python3 skills/chronos/scripts/migrate_legacy_entries.py --db /path/to/todo.db`
-2. `python3 skills/chronos/scripts/migrate_legacy_entries.py --db /path/to/todo.db --apply`
-3. `python3 skills/chronos/scripts/archive_legacy_entries.py --db /path/to/todo.db`
-4. `python3 skills/chronos/scripts/archive_legacy_entries.py --db /path/to/todo.db --apply`
-5. `python3 skills/chronos/scripts/normalize_historical_residues.py --db /path/to/todo.db`
-6. `python3 skills/chronos/scripts/normalize_historical_residues.py --db /path/to/todo.db --apply`
+1. `python3 skills/chronos/scripts/migrate_legacy_entries.py --db /path/to/.Chonos/config/todo.db`
+2. `python3 skills/chronos/scripts/migrate_legacy_entries.py --db /path/to/.Chonos/config/todo.db --apply`
+3. `python3 skills/chronos/scripts/archive_legacy_entries.py --db /path/to/.Chonos/config/todo.db`
+4. `python3 skills/chronos/scripts/archive_legacy_entries.py --db /path/to/.Chonos/config/todo.db --apply`
+5. `python3 skills/chronos/scripts/normalize_historical_residues.py --db /path/to/.Chonos/config/todo.db`
+6. `python3 skills/chronos/scripts/normalize_historical_residues.py --db /path/to/.Chonos/config/todo.db --apply`
 
 ## 历史残留清理
 

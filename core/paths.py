@@ -9,13 +9,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 
 _DEFAULT_WORKSPACE = Path.home() / ".Chonos" / "workspace"
-_LEGACY_OPENCLAW_WORKSPACE = Path.home() / ".openclaw" / "workspace"
 _PROJECT_LOCAL_WORKSPACE = PROJECT_ROOT / ".Chonos"
+_CONFIG_DIRNAME = "config"
 
 
 def _explicit_workspace_candidates() -> list[Path]:
     candidates: list[Path] = []
-    for env_name in ("CHRONOS_WORKSPACE", "OPENCLAW_WORKSPACE"):
+    for env_name in ("CHRONOS_WORKSPACE",):
         raw_value = os.getenv(env_name)
         if raw_value:
             candidates.append(Path(raw_value).expanduser())
@@ -24,8 +24,15 @@ def _explicit_workspace_candidates() -> list[Path]:
 
 def _workspace_candidates() -> list[Path]:
     candidates = _explicit_workspace_candidates()
-    candidates.extend([_PROJECT_LOCAL_WORKSPACE, _DEFAULT_WORKSPACE, _LEGACY_OPENCLAW_WORKSPACE, PROJECT_ROOT])
+    candidates.extend([_PROJECT_LOCAL_WORKSPACE, _DEFAULT_WORKSPACE, PROJECT_ROOT])
     return candidates
+
+
+def _candidate_db_paths(workspace: Path) -> list[Path]:
+    return [
+        workspace / _CONFIG_DIRNAME / "todo.db",
+        workspace / "todo.db",  # legacy fallback
+    ]
 
 
 def resolve_workspace() -> Path:
@@ -38,7 +45,7 @@ def resolve_workspace() -> Path:
         return explicit_candidates[0]
 
     for candidate in _workspace_candidates():
-        if (candidate / "todo.db").exists():
+        if any(db_path.exists() for db_path in _candidate_db_paths(candidate)):
             return candidate
 
     for candidate in _workspace_candidates():
@@ -49,7 +56,8 @@ def resolve_workspace() -> Path:
 
 
 WORKSPACE = resolve_workspace()
-TODO_DB = Path(os.getenv("CHRONOS_DB_PATH", str(WORKSPACE / "todo.db"))).expanduser()
+CONFIG_DIR = WORKSPACE / _CONFIG_DIRNAME
+TODO_DB = Path(os.getenv("CHRONOS_DB_PATH", str(CONFIG_DIR / "todo.db"))).expanduser()
 PYTHON_BIN = os.getenv("CHRONOS_PYTHON_BIN") or sys.executable or "python"
 OPENCLAW_BIN = os.getenv("OPENCLAW_BIN", "openclaw")
 

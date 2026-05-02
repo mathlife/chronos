@@ -3,13 +3,15 @@ import json
 import os
 from pathlib import Path
 
+from .paths import CONFIG_DIR
+
 
 def get_config_path() -> Path:
     """Return the configuration file path."""
     configured = os.getenv("CHRONOS_CONFIG_PATH")
     if configured:
         return Path(configured).expanduser()
-    return Path.home() / ".config" / "chronos" / "config.json"
+    return CONFIG_DIR / "config.json"
 
 
 def _load_config_file(config_path: Path) -> tuple[dict, str | None]:
@@ -107,7 +109,7 @@ def get_chat_id() -> str:
 
     Priority:
     1. Environment variable: CHRONOS_CHAT_ID
-    2. Config file: ~/.config/chronos/config.json or CHRONOS_CONFIG_PATH (field: chat_id)
+    2. Config file: <workspace>/config/config.json or CHRONOS_CONFIG_PATH (field: chat_id)
     3. Raises error if not configured
     """
     return validate_config()["chat_id"]
