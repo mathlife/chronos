@@ -62,12 +62,12 @@ python3 skills/chronos/scripts/todo.py add "刷新本地缓存" \
   --task-kind system \
   --system-command "powershell -NoProfile -File D:\\ops\\refresh-cache.ps1"
 
-python3 skills/chronos/scripts/migrate_legacy_entries.py --db /home/ubuntu/.openclaw/workspace/todo.db
-python3 skills/chronos/scripts/migrate_legacy_entries.py --db /home/ubuntu/.openclaw/workspace/todo.db --apply
-python3 skills/chronos/scripts/archive_legacy_entries.py --db /home/ubuntu/.openclaw/workspace/todo.db
-python3 skills/chronos/scripts/archive_legacy_entries.py --db /home/ubuntu/.openclaw/workspace/todo.db --apply
-python3 skills/chronos/scripts/normalize_historical_residues.py --db /home/ubuntu/.openclaw/workspace/todo.db
-python3 skills/chronos/scripts/normalize_historical_residues.py --db /home/ubuntu/.openclaw/workspace/todo.db --apply
+python3 skills/chronos/scripts/migrate_legacy_entries.py --db "$(pwd)/.Chonos/todo.db"
+python3 skills/chronos/scripts/migrate_legacy_entries.py --db "$(pwd)/.Chonos/todo.db" --apply
+python3 skills/chronos/scripts/archive_legacy_entries.py --db "$(pwd)/.Chonos/todo.db"
+python3 skills/chronos/scripts/archive_legacy_entries.py --db "$(pwd)/.Chonos/todo.db" --apply
+python3 skills/chronos/scripts/normalize_historical_residues.py --db "$(pwd)/.Chonos/todo.db"
+python3 skills/chronos/scripts/normalize_historical_residues.py --db "$(pwd)/.Chonos/todo.db" --apply
 python3 skills/chronos/scripts/todo.py complete-overdue --dry-run
 python3 skills/chronos/scripts/schema_preflight.py
 ```
