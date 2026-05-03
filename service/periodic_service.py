@@ -242,6 +242,31 @@ class PeriodicTaskManager:
                 db_commit()
         return True
 
+    def _skip_occurrence_internal(
+        self,
+        occurrence_id: int,
+        *,
+        completion_mode: str,
+        special_handler_result: str | None = None,
+    ) -> bool:
+        cur = self.db.execute(
+            """
+            UPDATE periodic_occurrences
+            SET status = 'skipped',
+                completed_at = CURRENT_TIMESTAMP,
+                completion_mode = ?,
+                special_handler_result = COALESCE(?, special_handler_result),
+                reminder_job_id = NULL,
+                execution_job_id = NULL
+            WHERE id = ? AND status NOT IN ('completed', 'skipped')
+            """,
+            (completion_mode, special_handler_result, occurrence_id),
+        )
+        if cur.rowcount <= 0:
+            return False
+        db_commit()
+        return True
+
     def _schedule_system_occurrence_jobs(self, occurrence_id: int, occ_date: date, time_of_day: str) -> tuple[Optional[str], Optional[str]]:
         if not supports_system_scheduler():
             raise RuntimeError("system scheduler is not supported on this platform")
@@ -285,6 +310,7 @@ class PeriodicTaskManager:
             return False
 
         result_message = None
+        blocked_by_policy = False
         if row["special_handler"] == "run_command":
             METRICS.inc("system_command_attempt_total")
             try:
@@ -306,6 +332,7 @@ class PeriodicTaskManager:
             except ValueError as exc:
                 METRICS.inc("system_command_blocked_total")
                 result_message = f"blocked={exc}"
+                blocked_by_policy = True
                 emit_log("system_command.blocked", level="WARNING", occurrence_id=occurrence_id, error=str(exc))
             except Exception as exc:
                 METRICS.inc("system_command_error_total")
@@ -313,6 +340,14 @@ class PeriodicTaskManager:
                 emit_log("system_command.error", level="ERROR", occurrence_id=occurrence_id, error=str(exc))
         else:
             result_message = f"system occurrence reached due time for task {row['name']}"
+
+        if blocked_by_policy:
+            self._skip_occurrence_internal(
+                occurrence_id,
+                completion_mode="blocked_policy",
+                special_handler_result=result_message,
+            )
+            return True
 
         self._complete_occurrence_internal(
             occurrence_id,

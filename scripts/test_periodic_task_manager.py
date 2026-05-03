@@ -174,8 +174,8 @@ def test_run_system_occurrence_blocks_legacy_shell_payload() -> None:
     row = manager.db.execute(
         "SELECT status, completion_mode, special_handler_result FROM periodic_occurrences WHERE id = 1"
     ).fetchone()
-    assert row[0] == "completed"
-    assert row[1] == "system_scheduler"
+    assert row[0] == "skipped"
+    assert row[1] == "blocked_policy"
     assert "blocked=" in (row[2] or "")
     manager.db.close()
     reset_db_singleton(db_module)

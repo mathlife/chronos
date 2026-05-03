@@ -179,7 +179,10 @@ def test_remove_task_failure_keeps_db_state() -> None:
     )
     db_module.db_commit()
 
-    with mock.patch("core.integration_api.remove_job", side_effect=RuntimeError("crontab failure")):
+    with mock.patch("core.integration_api.supports_system_scheduler", return_value=True), mock.patch(
+        "core.integration_api.remove_job",
+        side_effect=RuntimeError("crontab failure"),
+    ):
         try:
             remove_task(task_id, hard=False)
             raise AssertionError("expected remove_task failure")
@@ -207,6 +210,60 @@ def test_remove_task_failure_keeps_db_state() -> None:
     reset_db_singleton(db_module)
 
 
+def test_remove_task_without_scheduler_still_updates_db() -> None:
+    db_path = make_case_dir("integration-remove-no-scheduler") / "todo.db"
+    prepare_temp_db(db_path)
+    paths_module.TODO_DB = db_path
+    db_module.TODO_DB = db_path
+    reset_db_singleton(db_module)
+
+    created = create_task(
+        {
+            "name": "Integration remove no scheduler task",
+            "cycle_type": "daily",
+            "time_of_day": "09:00",
+            "task_kind": "scheduled",
+        }
+    )
+    task_id = int(created["id"])
+    db = db_module.DB()
+    db.execute(
+        """
+        INSERT INTO periodic_occurrences (task_id, date, status, reminder_job_id, execution_job_id, scheduled_time, scheduled_at)
+        VALUES (?, '2026-05-03', 'pending', 'chronos_reminder_x', 'chronos_exec_x', '09:00', '2026-05-03T09:00:00')
+        """,
+        (task_id,),
+    )
+    db_module.db_commit()
+
+    with mock.patch("core.integration_api.supports_system_scheduler", return_value=False), mock.patch(
+        "core.integration_api.remove_job",
+        side_effect=AssertionError("remove_job should not be called when scheduler is unavailable"),
+    ):
+        removed = remove_task(task_id, hard=False)
+        assert removed is True
+
+    task_row = db.execute("SELECT is_active FROM periodic_tasks WHERE id = ?", (task_id,)).fetchone()
+    assert task_row[0] == 0
+    occ_row = db.execute(
+        "SELECT status, reminder_job_id, execution_job_id FROM periodic_occurrences WHERE task_id = ?",
+        (task_id,),
+    ).fetchone()
+    assert occ_row[0] == "skipped"
+    assert occ_row[1] is None
+    assert occ_row[2] is None
+    op_row = db.execute(
+        "SELECT status, error FROM scheduler_operation_log WHERE task_id = ? ORDER BY created_at DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    assert op_row is not None
+    assert op_row[0] == "applied_with_warning"
+    assert "scheduler unavailable" in (op_row[1] or "")
+
+    db.close()
+    reset_db_singleton(db_module)
+
+
 if __name__ == "__main__":
     test_task_flow()
     print("[ok] integration API task flow")
@@ -214,3 +271,5 @@ if __name__ == "__main__":
     print("[ok] integration API channel flow")
     test_remove_task_failure_keeps_db_state()
     print("[ok] remove_task failure keeps DB state and records failed operation log")
+    test_remove_task_without_scheduler_still_updates_db()
+    print("[ok] remove_task degrades gracefully when scheduler is unavailable")
