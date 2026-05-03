@@ -6,6 +6,7 @@ import argparse
 import base64
 import hmac
 import json
+import re
 import sqlite3
 import sys
 import traceback
@@ -22,10 +23,11 @@ from core.config import get_raw_config, inspect_config, save_raw_config
 from core.integration_api import create_task, delete_channel, put_channel, remove_task, update_task
 from core.observability import METRICS, emit_log
 from core.paths import TODO_DB
-from core.system_scheduler import supports_system_scheduler
+from core.system_scheduler import remove_job, supports_system_scheduler
 from core.timezones import get_shanghai_tz
 
 SHANGHAI_TZ = get_shanghai_tz()
+_TIME_OF_DAY_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 HTML_PAGE = """<!doctype html>
 <html lang="zh-CN">
@@ -246,6 +248,47 @@ HTML_PAGE = """<!doctype html>
       <section class="card" style="grid-column:1/-1;">
         <h2>Today Tasks</h2>
         <div id="today"></div>
+        <label style="margin-top:8px; display:block;">Today task editor</label>
+        <div class="row">
+          <div>
+            <label>Select today task</label>
+            <select id="todayTaskSelect"></select>
+          </div>
+          <div>
+            <label>Identifier</label>
+            <input id="todayTaskIdentifier" readonly />
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div>
+            <label>Name</label>
+            <input id="todayFormName" placeholder="task/entry name" />
+          </div>
+          <div>
+            <label>Status</label>
+            <select id="todayFormStatus">
+              <option value="pending">pending</option>
+              <option value="in_progress">in_progress</option>
+              <option value="reminded">reminded</option>
+              <option value="completed">completed</option>
+              <option value="skipped">skipped</option>
+            </select>
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div>
+            <label>Scheduled time (FIN only, HH:MM)</label>
+            <input id="todayFormTime" type="time" />
+          </div>
+          <div>
+            <label>Type</label>
+            <input id="todayTaskType" readonly />
+          </div>
+        </div>
+        <div class="btns">
+          <button class="alt" onclick="updateSelectedTodayTask()">Save selected today task</button>
+          <button class="warn" onclick="removeSelectedTodayTask()">Delete selected today task</button>
+        </div>
       </section>
       <section class="card" style="grid-column:1/-1;">
         <h2>All Periodic Tasks</h2>
@@ -271,12 +314,15 @@ HTML_PAGE = """<!doctype html>
     let serverReadOnly = false;
     let tasksCache = [];
     let channelsCache = [];
+    let todayTasksCache = [];
     let taskFormDirty = false;
     let channelFormDirty = false;
+    let todayFormDirty = false;
     const channelFormFieldIds = [
       'channelFormId','channelFormType','channelFormEnabled','channelFormBotToken',
       'channelFormChatId','channelFormUrl','channelFormSecret'
     ];
+    const todayFormFieldIds = ['todayFormName', 'todayFormStatus', 'todayFormTime'];
     const taskFormFieldIds = [
       'taskFormName','taskFormTaskKind','taskFormCycleType','taskFormTime','taskFormStartDate',
       'taskFormEndDate','taskFormDeliveryTarget','taskFormIsActive','taskFormWeekday','taskFormIntervalHours'
@@ -298,7 +344,8 @@ HTML_PAGE = """<!doctype html>
       const enabled = editingEnabled() && !serverReadOnly;
       const targets = [
         'legacyChatId','editChannelSelect','channelFormId','channelFormType','channelFormEnabled',
-        'channelFormBotToken','channelFormChatId','channelFormUrl','channelFormSecret','editTaskSelect',
+        'channelFormBotToken','channelFormChatId','channelFormUrl','channelFormSecret','todayTaskSelect',
+        'todayFormName','todayFormStatus','todayFormTime','editTaskSelect',
         'taskFormName','taskFormTaskKind','taskFormCycleType','taskFormTime','taskFormStartDate',
         'taskFormEndDate','taskFormDeliveryTarget','taskFormIsActive','taskFormWeekday','taskFormIntervalHours'
       ];
@@ -327,6 +374,8 @@ HTML_PAGE = """<!doctype html>
       em.addEventListener('change', applyEditLock);
       const channelSelect = document.getElementById('editChannelSelect');
       if (channelSelect) channelSelect.addEventListener('change', () => loadSelectedChannel(false));
+      const todayTaskSelect = document.getElementById('todayTaskSelect');
+      if (todayTaskSelect) todayTaskSelect.addEventListener('change', () => loadSelectedTodayTask(false));
       const taskSelect = document.getElementById('editTaskSelect');
       if (taskSelect) taskSelect.addEventListener('change', () => loadSelectedTask(false));
       const channelType = document.getElementById('channelFormType');
@@ -339,6 +388,12 @@ HTML_PAGE = """<!doctype html>
         if (!el) continue;
         el.addEventListener('input', () => { channelFormDirty = true; });
         el.addEventListener('change', () => { channelFormDirty = true; });
+      }
+      for (const id of todayFormFieldIds) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        el.addEventListener('input', () => { todayFormDirty = true; });
+        el.addEventListener('change', () => { todayFormDirty = true; });
       }
       for (const id of taskFormFieldIds) {
         const el = document.getElementById(id);
@@ -503,6 +558,108 @@ HTML_PAGE = """<!doctype html>
         if (!sure) return;
         await callApi(`${API_BASE}/channel/remove`, { id });
         setResult(true, `removed channel ${id}`);
+        await load();
+      } catch (e) { setResult(false, e.message); }
+    }
+    function setTodayFormValue(id, value) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.value = value == null ? '' : String(value);
+    }
+    function fillTodayForm(item) {
+      setTodayFormValue('todayTaskIdentifier', item.identifier || '');
+      setTodayFormValue('todayTaskType', item.item_type || '');
+      setTodayFormValue('todayFormName', item.name || '');
+      setTodayFormValue('todayFormStatus', item.status || 'pending');
+      setTodayFormValue('todayFormTime', item.scheduled_time || '');
+    }
+    function renderTodayOptions(backgroundRefresh = false) {
+      const select = document.getElementById('todayTaskSelect');
+      if (!select) return;
+      const previous = select.value;
+      const items = todayTasksCache || [];
+      select.innerHTML = '';
+      if (!items.length) {
+        setTodayFormValue('todayTaskIdentifier', '');
+        setTodayFormValue('todayTaskType', '');
+        setTodayFormValue('todayFormName', '');
+        setTodayFormValue('todayFormStatus', 'pending');
+        setTodayFormValue('todayFormTime', '');
+        return;
+      }
+      for (const item of items) {
+        const opt = document.createElement('option');
+        const identifier = String(item.identifier || '');
+        const kind = String(item.item_type || '');
+        opt.value = identifier;
+        opt.textContent = `${identifier} ${item.name || ''} (${kind}, ${item.status || ''})`;
+        select.appendChild(opt);
+      }
+      const matched = items.some(t => String(t.identifier || '') === previous);
+      select.value = matched ? previous : String(items[0].identifier || '');
+      if (backgroundRefresh && todayFormDirty) return;
+      loadSelectedTodayTask(false);
+    }
+    function loadSelectedTodayTask(showMessage = true) {
+      const select = document.getElementById('todayTaskSelect');
+      const identifier = String((select && select.value) || '').trim();
+      if (!identifier) {
+        if (showMessage) setResult(false, 'select a today task first');
+        return;
+      }
+      const item = (todayTasksCache || []).find(t => String(t.identifier || '') === identifier);
+      if (!item) {
+        if (showMessage) setResult(false, `today task ${identifier} not found in current snapshot`);
+        return;
+      }
+      fillTodayForm(item);
+      todayFormDirty = false;
+      if (showMessage) setResult(true, `loaded ${identifier} for editing`);
+    }
+    function selectTodayByIdentifier(identifier, showMessage = true) {
+      const id = String(identifier || '').trim();
+      const select = document.getElementById('todayTaskSelect');
+      if (select) select.value = id;
+      loadSelectedTodayTask(showMessage);
+    }
+    function buildTodayPatchFromForm(item) {
+      const name = String(document.getElementById('todayFormName').value || '').trim();
+      const status = String(document.getElementById('todayFormStatus').value || '').trim();
+      const scheduledTime = String(document.getElementById('todayFormTime').value || '').trim();
+      if (!name) throw new Error('name is required');
+      if (!status) throw new Error('status is required');
+      const patch = { name, status };
+      if (item.item_type === 'occurrence') {
+        patch.scheduled_time = scheduledTime || null;
+      }
+      return patch;
+    }
+    async function updateSelectedTodayTask() {
+      try {
+        ensureWritableAction();
+        const select = document.getElementById('todayTaskSelect');
+        const identifier = String((select && select.value) || '').trim();
+        if (!identifier) throw new Error('select a today task first');
+        const item = (todayTasksCache || []).find(t => String(t.identifier || '') === identifier);
+        if (!item) throw new Error(`today task ${identifier} not found in current snapshot`);
+        const patch = buildTodayPatchFromForm(item);
+        await callApi(`${API_BASE}/today/update`, { identifier, patch });
+        setResult(true, `updated ${identifier}`);
+        await load();
+      } catch (e) { setResult(false, e.message); }
+    }
+    async function removeSelectedTodayTask(identifier = null) {
+      try {
+        ensureWritableAction();
+        const select = document.getElementById('todayTaskSelect');
+        const picked = identifier == null
+          ? String((select && select.value) || '').trim()
+          : String(identifier).trim();
+        if (!picked) throw new Error('select a today task first');
+        const sure = window.confirm(`Delete today task ${picked}?`);
+        if (!sure) return;
+        await callApi(`${API_BASE}/today/remove`, { identifier: picked });
+        setResult(true, `deleted ${picked}`);
         await load();
       } catch (e) { setResult(false, e.message); }
     }
@@ -715,8 +872,10 @@ db_path: ${esc(s.db_path)}</pre>
         ])
       );
       const today = data.today_tasks || [];
+      todayTasksCache = today;
+      renderTodayOptions(backgroundRefresh);
       document.getElementById('today').innerHTML = table(
-        ['id','name','kind','cycle','time','status','source'],
+        ['id','name','kind','cycle','time','status','source','actions'],
         today.map(t => [
           esc(t.identifier),
           esc(t.name),
@@ -724,7 +883,8 @@ db_path: ${esc(s.db_path)}</pre>
           esc(t.cycle_type),
           esc(t.scheduled_time || ''),
           esc(t.status),
-          esc(t.source || '')
+          esc(t.source || ''),
+          `<div class="btns"><button class="alt" onclick='selectTodayByIdentifier(${JSON.stringify(String(t.identifier || ""))})'>Edit</button><button class="warn" onclick='removeSelectedTodayTask(${JSON.stringify(String(t.identifier || ""))})'>Delete</button></div>`
         ])
       );
       const tasks = data.tasks || [];
@@ -844,6 +1004,9 @@ def build_snapshot(db_path: Path, *, read_only: bool = False) -> dict:
         today_tasks = []
         for row in today_rows:
             row["identifier"] = f"FIN-{row.get('occ_id')}"
+            row["item_type"] = "occurrence"
+            row["occurrence_id"] = row.get("occ_id")
+            row["entry_id"] = None
             today_tasks.append(row)
 
         simple_rows = _safe_query(
@@ -864,6 +1027,9 @@ def build_snapshot(db_path: Path, *, read_only: bool = False) -> dict:
             today_tasks.append(
                 {
                     "identifier": f"ID{row.get('id')}",
+                    "item_type": "entry",
+                    "occurrence_id": None,
+                    "entry_id": row.get("id"),
                     "name": row.get("text"),
                     "cycle_type": "legacy",
                     "task_kind": "entry",
@@ -944,7 +1110,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if self.read_only_mode:
                 raise ValueError("server is running in read-only mode")
             payload = self._read_json_body()
-            result = handle_mutation(parsed.path, payload)
+            result = handle_mutation(parsed.path, payload, db_path=self.db_path)
             METRICS.inc("web_mutation_success_total")
             self._write_json({"ok": True, "data": result})
         except ValueError as exc:
@@ -1060,9 +1226,132 @@ def _parse_channel_id(payload: dict) -> str:
     return channel_id
 
 
-def handle_mutation(path: str, payload: dict) -> dict:
+def _db_connect(db_path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _parse_today_identifier(identifier: str) -> tuple[str, int]:
+    raw = (identifier or "").strip()
+    if raw.startswith("FIN-"):
+        token = raw[4:].strip()
+        if not token.isdigit():
+            raise ValueError("invalid today identifier")
+        return "occurrence", int(token)
+    if raw.startswith("ID"):
+        token = raw[2:].strip()
+        if not token.isdigit():
+            raise ValueError("invalid today identifier")
+        return "entry", int(token)
+    raise ValueError("invalid today identifier")
+
+
+def _validate_time_of_day(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if not _TIME_OF_DAY_RE.match(text):
+        raise ValueError("scheduled_time must be HH:MM")
+    return text
+
+
+def _validate_today_status(value: Any) -> str:
+    status = str(value or "").strip()
+    allowed = {"pending", "in_progress", "reminded", "completed", "skipped"}
+    if status not in allowed:
+        raise ValueError("status must be one of pending/in_progress/reminded/completed/skipped")
+    return status
+
+
+def update_today_task(db_path: Path, *, identifier: str, patch: dict) -> dict:
+    kind, row_id = _parse_today_identifier(identifier)
+    patch = _expect_object(patch, field_name="patch")
+    name = str(patch.get("name") or "").strip()
+    if not name:
+        raise ValueError("patch.name is required")
+    status = _validate_today_status(patch.get("status"))
+    scheduled_time = _validate_time_of_day(patch.get("scheduled_time"))
+    conn = _db_connect(db_path)
+    try:
+        if kind == "occurrence":
+            row = conn.execute(
+                """
+                SELECT o.id, o.task_id, o.reminder_job_id, o.execution_job_id
+                FROM periodic_occurrences o
+                WHERE o.id = ?
+                """,
+                (row_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"today task {identifier} not found")
+            reminder_job_id = row["reminder_job_id"]
+            execution_job_id = row["execution_job_id"]
+            if reminder_job_id and supports_system_scheduler():
+                remove_job(str(reminder_job_id))
+            if execution_job_id and supports_system_scheduler():
+                remove_job(str(execution_job_id))
+            conn.execute(
+                "UPDATE periodic_tasks SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (name, int(row["task_id"])),
+            )
+            conn.execute(
+                """
+                UPDATE periodic_occurrences
+                SET status = ?, scheduled_time = ?, reminder_job_id = NULL, execution_job_id = NULL
+                WHERE id = ?
+                """,
+                (status, scheduled_time, row_id),
+            )
+            conn.commit()
+            return {"identifier": identifier, "kind": kind, "id": row_id}
+        row = conn.execute("SELECT id FROM entries WHERE id = ?", (row_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"today task {identifier} not found")
+        conn.execute("UPDATE entries SET text = ?, status = ? WHERE id = ?", (name, status, row_id))
+        conn.commit()
+        return {"identifier": identifier, "kind": kind, "id": row_id}
+    finally:
+        conn.close()
+
+
+def remove_today_task(db_path: Path, *, identifier: str) -> dict:
+    kind, row_id = _parse_today_identifier(identifier)
+    conn = _db_connect(db_path)
+    try:
+        if kind == "occurrence":
+            row = conn.execute(
+                "SELECT reminder_job_id, execution_job_id FROM periodic_occurrences WHERE id = ?",
+                (row_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"today task {identifier} not found")
+            reminder_job_id = row["reminder_job_id"]
+            execution_job_id = row["execution_job_id"]
+            if reminder_job_id and supports_system_scheduler():
+                remove_job(str(reminder_job_id))
+            if execution_job_id and supports_system_scheduler():
+                remove_job(str(execution_job_id))
+            conn.execute("DELETE FROM periodic_occurrences WHERE id = ?", (row_id,))
+            conn.commit()
+            return {"identifier": identifier, "kind": kind, "id": row_id}
+        cur = conn.execute("DELETE FROM entries WHERE id = ?", (row_id,))
+        if cur.rowcount <= 0:
+            raise ValueError(f"today task {identifier} not found")
+        conn.commit()
+        return {"identifier": identifier, "kind": kind, "id": row_id}
+    finally:
+        conn.close()
+
+
+def handle_mutation(path: str, payload: dict, *, db_path: Path | None = None) -> dict:
     normalized_path = _normalize_api_path(path)
     payload = _expect_object(payload, field_name="request body")
+    resolved_db_path = db_path or TODO_DB
     if normalized_path == "/api/v1/task/create":
         task_payload = _expect_object(payload.get("payload"), field_name="payload")
         return create_task(task_payload)
@@ -1101,6 +1390,17 @@ def handle_mutation(path: str, payload: dict) -> dict:
             raw.pop("chat_id", None)
         save_raw_config(raw)
         return {"chat_id": chat_id or None}
+    if normalized_path == "/api/v1/today/update":
+        identifier = str(payload.get("identifier") or "").strip()
+        if not identifier:
+            raise ValueError("identifier is required")
+        patch = _expect_object(payload.get("patch"), field_name="patch")
+        return update_today_task(Path(resolved_db_path), identifier=identifier, patch=patch)
+    if normalized_path == "/api/v1/today/remove":
+        identifier = str(payload.get("identifier") or "").strip()
+        if not identifier:
+            raise ValueError("identifier is required")
+        return remove_today_task(Path(resolved_db_path), identifier=identifier)
     raise ValueError("unsupported endpoint")
 
 

@@ -179,6 +179,87 @@ def test_mutation_ops() -> None:
     reset_db_singleton(db_module)
 
 
+def test_today_mutation_ops() -> None:
+    case_dir = make_case_dir("web-today-mutation")
+    db_path = case_dir / "todo.db"
+    config_path = case_dir / "config.json"
+    config_path.write_text(json.dumps({"channels": []}, ensure_ascii=False), encoding="utf-8")
+    original_config = os.environ.get("CHRONOS_CONFIG_PATH")
+    os.environ["CHRONOS_CONFIG_PATH"] = str(config_path)
+
+    prepare_temp_db(db_path)
+    paths_module.TODO_DB = db_path
+    db_module.TODO_DB = db_path
+    reset_db_singleton(db_module)
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        INSERT INTO periodic_tasks
+        (id, name, category, cycle_type, time_of_day, timezone, is_active, count_current_month, task_kind, source, created_at, updated_at)
+        VALUES (1, 'today-occ', 'Inbox', 'daily', '09:00', 'Asia/Shanghai', 1, 0, 'scheduled', 'chronos', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO periodic_occurrences (id, task_id, date, status, scheduled_time, scheduled_at)
+        VALUES (21, 1, '2026-05-03', 'pending', '09:00', '2026-05-03T09:00:00+08:00')
+        """
+    )
+    conn.execute("INSERT INTO entries (id, text, status, group_id) VALUES (31, 'legacy-old', 'pending', NULL)")
+    conn.commit()
+    conn.close()
+
+    occ_updated = handle_mutation(
+        "/api/v1/today/update",
+        {"identifier": "FIN-21", "patch": {"name": "today-occ-new", "status": "in_progress", "scheduled_time": "10:15"}},
+        db_path=db_path,
+    )
+    assert occ_updated["identifier"] == "FIN-21"
+
+    ent_updated = handle_mutation(
+        "/api/v1/today/update",
+        {"identifier": "ID31", "patch": {"name": "legacy-new", "status": "completed"}},
+        db_path=db_path,
+    )
+    assert ent_updated["identifier"] == "ID31"
+
+    conn = sqlite3.connect(str(db_path))
+    occ_row = conn.execute(
+        """
+        SELECT t.name, o.status, o.scheduled_time
+        FROM periodic_occurrences o
+        JOIN periodic_tasks t ON t.id = o.task_id
+        WHERE o.id = 21
+        """
+    ).fetchone()
+    assert occ_row is not None
+    assert occ_row[0] == "today-occ-new"
+    assert occ_row[1] == "in_progress"
+    assert occ_row[2] == "10:15"
+    entry_row = conn.execute("SELECT text, status FROM entries WHERE id = 31").fetchone()
+    assert entry_row is not None
+    assert entry_row[0] == "legacy-new"
+    assert entry_row[1] == "completed"
+    conn.close()
+
+    removed_occ = handle_mutation("/api/v1/today/remove", {"identifier": "FIN-21"}, db_path=db_path)
+    assert removed_occ["identifier"] == "FIN-21"
+    removed_entry = handle_mutation("/api/v1/today/remove", {"identifier": "ID31"}, db_path=db_path)
+    assert removed_entry["identifier"] == "ID31"
+
+    conn = sqlite3.connect(str(db_path))
+    assert conn.execute("SELECT 1 FROM periodic_occurrences WHERE id = 21").fetchone() is None
+    assert conn.execute("SELECT 1 FROM entries WHERE id = 31").fetchone() is None
+    conn.close()
+
+    if original_config is None:
+        os.environ.pop("CHRONOS_CONFIG_PATH", None)
+    else:
+        os.environ["CHRONOS_CONFIG_PATH"] = original_config
+    reset_db_singleton(db_module)
+
+
 def test_read_only_server_rejects_mutation() -> None:
     case_dir = make_case_dir("web-read-only")
     db_path = case_dir / "todo.db"
@@ -280,6 +361,8 @@ if __name__ == "__main__":
     print("[ok] snapshot excludes linked legacy entries")
     test_mutation_ops()
     print("[ok] mutation ops for task/channel/settings")
+    test_today_mutation_ops()
+    print("[ok] today mutation ops for occurrence/entry")
     test_read_only_server_rejects_mutation()
     print("[ok] read-only server rejects mutation")
     test_health_endpoint()
