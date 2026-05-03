@@ -13,7 +13,9 @@ Chronos 是一个轻量级周期任务引擎，核心基于 `periodic_tasks` + `
 - `system` 任务可在 Linux 上通过 `crontab` 落地为系统级调度任务。
 - 支持 `monthly_dates` 周期类型。
 - 支持 `hourly` 周期类型（`interval_hours` + `time_of_day` 锚点语义）。
-- `monthly_n_times` 支持 `weekday=0..6`（按周）和 `weekday=NULL`（按天），并继续执行月度配额。
+- 月度调度统一为：
+  - `monthly_dates`：固定日期（支持单日或多日）
+  - `monthly_range`：日期窗口，可选 `n_per_month` 配额（支持跨月窗口，例如 `10 -> 次月03`）
 - 特殊系统行为建议通过显式 `special_handler` 元数据表达，而不是依赖自由文本正则。
 
 ## 快速示例
@@ -164,8 +166,13 @@ python3 skills/chronos/scripts/web_dashboard.py --host 127.0.0.1 --port 8765 --r
 Chronos 面向用户的调度分类：
 
 - `once`：一次性任务（必须给 `start_date`）。
-- `monthly_n_times`：每月最多完成 `n_per_month` 次，可选 `weekday` 约束。
-- 其他周期任务：`daily`、`hourly`、`weekly`、`monthly_fixed`、`monthly_range`、`monthly_dates`。
+- `monthly_dates`：按明确日期列表触发（例如 `1,10,25`）。
+- `monthly_range`：按日期窗口触发；可选 `n_per_month` 实现配额语义。
+- 其他周期任务：`daily`、`hourly`、`weekly`。
+
+兼容说明：
+- legacy `monthly_fixed` 会规范化为 `monthly_dates`
+- legacy `monthly_n_times` 会规范化为 `monthly_range + n_per_month`
 
 对于确定性命令型系统任务：
 
@@ -190,7 +197,9 @@ Chronos 面向用户的调度分类：
 
 建模方式：
 
-- `cycle_type=monthly_n_times`
+- `cycle_type=monthly_range`
+- `range_start=1`
+- `range_end=31`
 - `n_per_month=1`
 - `weekday=NULL`（表示日频而非周频）
 

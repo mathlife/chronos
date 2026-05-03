@@ -13,7 +13,9 @@ Chronos runtime no longer requires `openclaw` for normal scheduling/notification
 - `system` tasks can be materialized as OS-level scheduled jobs on Linux via `crontab`, instead of waiting for model-side reasoning loops.
 - `monthly_dates` is a supported cycle type.
 - `hourly` is a supported cycle type, with `interval_hours` + `time_of_day` anchor semantics.
-- `monthly_n_times` can now run on either a weekday cadence (`weekday=0..6`) or a daily cadence (`weekday=NULL`) while still enforcing a monthly completion quota.
+- Monthly scheduling is unified around:
+  - `monthly_dates` for fixed calendar dates (single or multiple days)
+  - `monthly_range` for day-window cadence, optionally with `n_per_month` quota (including cross-month windows like `10 -> next-month 03`)
 - Special system behaviors should live in explicit task metadata (`special_handler`) instead of free-text regex whenever possible.
 
 ## Quick examples
@@ -152,11 +154,16 @@ This is conservative and matches the legacy `每 4 小时：同步 subagent 记�
 
 ## Task categories
 
-Chronos now has three user-facing scheduling categories:
+Chronos now has these user-facing scheduling categories:
 
 - `once`: a one-shot task with explicit `start_date`
-- `monthly_n_times`: complete up to `n_per_month` times within the month, optionally constrained by `weekday`
-- periodic tasks: `daily`, `hourly`, `weekly`, `monthly_fixed`, `monthly_range`, `monthly_dates`
+- `monthly_dates`: run on explicit day list (for example `1,10,25`)
+- `monthly_range`: run inside a day window; optional `n_per_month` adds quota semantics
+- other periodic tasks: `daily`, `hourly`, `weekly`
+
+Compatibility note:
+- legacy `monthly_fixed` is normalized to `monthly_dates`
+- legacy `monthly_n_times` is normalized to `monthly_range` + `n_per_month`
 
 For command-style deterministic system work:
 
@@ -179,7 +186,9 @@ For tasks like `福建农行秒杀京东卡`, the intended semantic is not plain
 - resume naturally after the monthly counter resets on the next month boundary
 
 This is represented as:
-- `cycle_type=monthly_n_times`
+- `cycle_type=monthly_range`
+- `range_start=1`
+- `range_end=31`
 - `n_per_month=1`
 - `weekday=NULL` to mean daily cadence instead of weekly cadence
 
