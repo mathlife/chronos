@@ -95,40 +95,82 @@ HTML_PAGE = """<!doctype html>
             </div>
           </div>
           <div>
-            <label>Remove channel by id</label>
-            <input id="removeChannelId" placeholder="e.g. tg-main" />
+            <label>Edit existing channel</label>
+            <select id="editChannelSelect"></select>
             <div class="btns">
-              <button class="warn" onclick="removeChannel()">Remove channel</button>
+              <button class="alt" onclick="loadSelectedChannel()">Load selected channel</button>
+              <button class="alt" onclick="startCreateChannel()">Create new channel mode</button>
             </div>
           </div>
         </div>
-        <label style="margin-top:8px; display:block;">Upsert channel JSON</label>
-        <textarea id="channelJson">{"id":"tg-main","type":"telegram","enabled":true,"config":{"bot_token":"<token>","chat_id":"<chat_id>"}}</textarea>
+        <label style="margin-top:8px; display:block;">Channel editor (form only)</label>
+        <div class="row">
+          <div>
+            <label>Channel id</label>
+            <input id="channelFormId" placeholder="e.g. tg-main / hook-main" />
+          </div>
+          <div>
+            <label>Channel type</label>
+            <select id="channelFormType">
+              <option value="telegram">telegram</option>
+              <option value="webhook">webhook</option>
+            </select>
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div>
+            <label>Enabled</label>
+            <select id="channelFormEnabled">
+              <option value="1">enabled</option>
+              <option value="0">disabled</option>
+            </select>
+          </div>
+          <div></div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div>
+            <label>Telegram bot_token</label>
+            <input id="channelFormBotToken" placeholder="required for telegram" />
+          </div>
+          <div>
+            <label>Telegram chat_id</label>
+            <input id="channelFormChatId" placeholder="required for telegram" />
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div>
+            <label>Webhook URL</label>
+            <input id="channelFormUrl" placeholder="required for webhook" />
+          </div>
+          <div>
+            <label>Webhook secret (optional)</label>
+            <input id="channelFormSecret" placeholder="optional" />
+          </div>
+        </div>
         <div class="btns">
-          <button class="alt" onclick="putChannel()">Upsert channel</button>
+          <button class="alt" onclick="upsertChannelFromForm()">Save channel</button>
+          <button class="warn" onclick="removeSelectedChannel()">Remove selected channel</button>
         </div>
         <div id="opResult"></div>
       </section>
       <section class="card" style="grid-column:1/-1;">
         <h2>Task Ops</h2>
-        <label>Create task JSON</label>
-        <textarea id="createTaskJson">{"name":"每周例会","cycle_type":"weekly","weekday":0,"time_of_day":"10:00","task_kind":"scheduled"}</textarea>
-        <div class="btns">
-          <button onclick="createTask()">Create task</button>
-        </div>
-        <div class="row" style="margin-top:8px;">
+        <div class="row">
           <div>
             <label>Edit existing task</label>
             <select id="editTaskSelect"></select>
           </div>
           <div>
-            <label>Quick remove selected task id</label>
-            <input id="removeTaskId" placeholder="e.g. 12" />
+            <label>Task selection helper</label>
+            <div class="btns">
+              <button class="alt" onclick="loadSelectedTask()">Load selected task</button>
+              <button class="alt" onclick="startCreateTask()">Create new task mode</button>
+            </div>
           </div>
         </div>
         <label style="margin-top:8px; display:block;">Original task JSON (read-only)</label>
         <textarea id="originalTaskJson" readonly>{}</textarea>
-        <label style="margin-top:8px; display:block;">Structured editor (recommended)</label>
+        <label style="margin-top:8px; display:block;">Task editor (form only)</label>
         <div class="row">
           <div>
             <label>Task name</label>
@@ -195,27 +237,10 @@ HTML_PAGE = """<!doctype html>
           </div>
         </div>
         <div class="btns">
-          <button class="alt" onclick="updateSelectedTaskByForm()">Save structured editor</button>
-        </div>
-        <label style="margin-top:8px; display:block;">Editable patch JSON (auto-filled from selected task)</label>
-        <textarea id="editTaskPatchJson">{}</textarea>
-        <div class="btns">
-          <button class="alt" onclick="loadSelectedTaskPatch()">Load selected task</button>
-          <button class="alt" onclick="updateSelectedTask()">Save selected task</button>
-        </div>
-        <div class="row" style="margin-top:8px;">
-          <div>
-            <label>Update task id</label>
-            <input id="updateTaskId" placeholder="e.g. 12" />
-          </div>
-          <div></div>
-        </div>
-        <label style="margin-top:8px; display:block;">Update patch JSON</label>
-        <textarea id="updateTaskJson">{"delivery_target":"tg-main,hook-main"}</textarea>
-        <div class="btns">
-          <button class="alt" onclick="updateTask()">Update task</button>
-          <button class="warn" onclick="removeTask(false)">Deactivate task</button>
-          <button class="warn" onclick="removeTask(true)">Hard delete task</button>
+          <button onclick="createTaskFromForm()">Create task</button>
+          <button class="alt" onclick="updateSelectedTaskByForm()">Save selected task</button>
+          <button class="warn" onclick="removeSelectedTask(false)">Deactivate selected task</button>
+          <button class="warn" onclick="removeSelectedTask(true)">Hard delete selected task</button>
         </div>
       </section>
       <section class="card" style="grid-column:1/-1;">
@@ -245,6 +270,17 @@ HTML_PAGE = """<!doctype html>
     }
     let serverReadOnly = false;
     let tasksCache = [];
+    let channelsCache = [];
+    let taskFormDirty = false;
+    let channelFormDirty = false;
+    const channelFormFieldIds = [
+      'channelFormId','channelFormType','channelFormEnabled','channelFormBotToken',
+      'channelFormChatId','channelFormUrl','channelFormSecret'
+    ];
+    const taskFormFieldIds = [
+      'taskFormName','taskFormTaskKind','taskFormCycleType','taskFormTime','taskFormStartDate',
+      'taskFormEndDate','taskFormDeliveryTarget','taskFormIsActive','taskFormWeekday','taskFormIntervalHours'
+    ];
     const taskPatchKeys = [
       'name','category','cycle_type','weekday','day_of_month','range_start','range_end',
       'n_per_month','interval_hours','time_of_day','end_date','start_date','reminder_template',
@@ -261,8 +297,8 @@ HTML_PAGE = """<!doctype html>
     function applyEditLock() {
       const enabled = editingEnabled() && !serverReadOnly;
       const targets = [
-        'legacyChatId','removeChannelId','channelJson','createTaskJson',
-        'editTaskSelect','editTaskPatchJson','updateTaskId','removeTaskId','updateTaskJson',
+        'legacyChatId','editChannelSelect','channelFormId','channelFormType','channelFormEnabled',
+        'channelFormBotToken','channelFormChatId','channelFormUrl','channelFormSecret','editTaskSelect',
         'taskFormName','taskFormTaskKind','taskFormCycleType','taskFormTime','taskFormStartDate',
         'taskFormEndDate','taskFormDeliveryTarget','taskFormIsActive','taskFormWeekday','taskFormIntervalHours'
       ];
@@ -272,7 +308,7 @@ HTML_PAGE = """<!doctype html>
       }
       document.querySelectorAll('button').forEach((btn) => {
         const text = (btn.textContent || '').toLowerCase();
-        if (text.includes('create') || text.includes('update') || text.includes('remove') || text.includes('delete') || text.includes('deactivate') || text.includes('upsert')) {
+        if (text.includes('create') || text.includes('update') || text.includes('save') || text.includes('remove') || text.includes('delete') || text.includes('deactivate') || text.includes('upsert')) {
           btn.disabled = !enabled;
         }
       });
@@ -284,12 +320,33 @@ HTML_PAGE = """<!doctype html>
       } else {
         state.textContent = 'Server mode: writable; browser edit mode disabled';
       }
+      syncChannelFormVisibility();
     }
     document.addEventListener('DOMContentLoaded', () => {
       const em = document.getElementById('editMode');
       em.addEventListener('change', applyEditLock);
+      const channelSelect = document.getElementById('editChannelSelect');
+      if (channelSelect) channelSelect.addEventListener('change', () => loadSelectedChannel(false));
       const taskSelect = document.getElementById('editTaskSelect');
-      if (taskSelect) taskSelect.addEventListener('change', () => loadSelectedTaskPatch(false));
+      if (taskSelect) taskSelect.addEventListener('change', () => loadSelectedTask(false));
+      const channelType = document.getElementById('channelFormType');
+      if (channelType) channelType.addEventListener('change', () => {
+        channelFormDirty = true;
+        syncChannelFormVisibility();
+      });
+      for (const id of channelFormFieldIds) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        el.addEventListener('input', () => { channelFormDirty = true; });
+        el.addEventListener('change', () => { channelFormDirty = true; });
+      }
+      for (const id of taskFormFieldIds) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        el.addEventListener('input', () => { taskFormDirty = true; });
+        el.addEventListener('change', () => { taskFormDirty = true; });
+      }
+      syncChannelFormVisibility();
       applyEditLock();
     });
     async function callApi(path, payload) {
@@ -302,28 +359,175 @@ HTML_PAGE = """<!doctype html>
       if (!data.ok) throw new Error(data.error || 'request failed');
       return data;
     }
-    async function createTask() {
+    function setChannelFormValue(id, value) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.value = value == null ? '' : String(value);
+    }
+    function syncChannelFormVisibility() {
+      const channelType = String(document.getElementById('channelFormType').value || 'telegram');
+      const isTelegram = channelType === 'telegram';
+      const writable = editingEnabled() && !serverReadOnly;
+      const tgIds = ['channelFormBotToken', 'channelFormChatId'];
+      const whIds = ['channelFormUrl', 'channelFormSecret'];
+      for (const id of tgIds) {
+        const el = document.getElementById(id);
+        if (el) el.disabled = !writable || (!isTelegram && channelType === 'webhook');
+      }
+      for (const id of whIds) {
+        const el = document.getElementById(id);
+        if (el) el.disabled = !writable || isTelegram;
+      }
+    }
+    function renderChannelOptions(backgroundRefresh = false) {
+      const select = document.getElementById('editChannelSelect');
+      if (!select) return;
+      const previous = select.value;
+      const items = channelsCache || [];
+      select.innerHTML = '';
+      const createOpt = document.createElement('option');
+      createOpt.value = '';
+      createOpt.textContent = 'Create new channel...';
+      select.appendChild(createOpt);
+      for (const channel of items) {
+        const opt = document.createElement('option');
+        const id = String(channel.id || '');
+        const type = String(channel.type || 'unknown');
+        const enabled = channel.enabled === false ? 'disabled' : 'enabled';
+        opt.value = id;
+        opt.textContent = `${id} (${type}, ${enabled})`;
+        select.appendChild(opt);
+      }
+      if (!items.length) {
+        startCreateChannel(false);
+        return;
+      }
+      const matched = items.some(c => String(c.id || '') === previous);
+      if (previous === '') {
+        select.value = '';
+      } else {
+        select.value = matched ? previous : String(items[0].id || '');
+      }
+      if (backgroundRefresh && channelFormDirty) return;
+      loadSelectedChannel(false);
+    }
+    function fillChannelForm(channel) {
+      const config = channel && typeof channel.config === 'object' && channel.config ? channel.config : {};
+      setChannelFormValue('channelFormId', channel.id || '');
+      setChannelFormValue('channelFormType', channel.type || 'telegram');
+      setChannelFormValue('channelFormEnabled', channel.enabled === false ? '0' : '1');
+      setChannelFormValue('channelFormBotToken', config.bot_token || '');
+      setChannelFormValue('channelFormChatId', config.chat_id || '');
+      setChannelFormValue('channelFormUrl', config.url || '');
+      setChannelFormValue('channelFormSecret', config.secret || '');
+      syncChannelFormVisibility();
+    }
+    function startCreateChannel(showMessage = true) {
+      const select = document.getElementById('editChannelSelect');
+      if (select) select.value = '';
+      fillChannelForm({
+        id: '',
+        type: 'telegram',
+        enabled: true,
+        config: {}
+      });
+      channelFormDirty = false;
+      if (showMessage) setResult(true, 'switched to channel create mode');
+    }
+    function loadSelectedChannel(showMessage = true) {
+      const select = document.getElementById('editChannelSelect');
+      const id = String((select && select.value) || '').trim();
+      if (!id) {
+        startCreateChannel(false);
+        if (showMessage) setResult(true, 'channel create mode');
+        return;
+      }
+      const channel = (channelsCache || []).find(c => String(c.id || '') === id);
+      if (!channel) {
+        if (showMessage) setResult(false, `channel ${id} not found in current snapshot`);
+        return;
+      }
+      fillChannelForm(channel);
+      channelFormDirty = false;
+      if (showMessage) setResult(true, `loaded channel ${id} for editing`);
+    }
+    function selectChannelById(channelId, showMessage = true) {
+      const id = String(channelId || '').trim();
+      const select = document.getElementById('editChannelSelect');
+      if (select) select.value = id;
+      loadSelectedChannel(showMessage);
+    }
+    function buildChannelFromForm() {
+      const id = String(document.getElementById('channelFormId').value || '').trim();
+      const type = String(document.getElementById('channelFormType').value || '').trim();
+      const enabled = String(document.getElementById('channelFormEnabled').value || '1') === '1';
+      if (!id) throw new Error('channel id is required');
+      if (!type) throw new Error('channel type is required');
+      const botToken = String(document.getElementById('channelFormBotToken').value || '').trim();
+      const chatId = String(document.getElementById('channelFormChatId').value || '').trim();
+      const url = String(document.getElementById('channelFormUrl').value || '').trim();
+      const secret = String(document.getElementById('channelFormSecret').value || '').trim();
+      const config = {};
+      if (type === 'telegram') {
+        if (!botToken) throw new Error('telegram bot_token is required');
+        if (!chatId) throw new Error('telegram chat_id is required');
+        config.bot_token = botToken;
+        config.chat_id = chatId;
+      } else if (type === 'webhook') {
+        if (!url) throw new Error('webhook url is required');
+        config.url = url;
+        if (secret) config.secret = secret;
+      } else {
+        throw new Error('unsupported channel type');
+      }
+      return { id, type, enabled, config };
+    }
+    async function upsertChannelFromForm() {
       try {
         ensureWritableAction();
-        const payload = JSON.parse(document.getElementById('createTaskJson').value);
+        const channel = buildChannelFromForm();
+        await callApi(`${API_BASE}/channel/put`, { channel });
+        setResult(true, `upserted channel ${channel.id}`);
+        await load();
+      } catch (e) { setResult(false, e.message); }
+    }
+    async function removeSelectedChannel(channelId = null) {
+      try {
+        ensureWritableAction();
+        const select = document.getElementById('editChannelSelect');
+        const id = channelId == null
+          ? String((select && select.value) || '').trim()
+          : String(channelId).trim();
+        if (!id) throw new Error('select a channel first');
+        const sure = window.confirm(`Remove channel ${id}?`);
+        if (!sure) return;
+        await callApi(`${API_BASE}/channel/remove`, { id });
+        setResult(true, `removed channel ${id}`);
+        await load();
+      } catch (e) { setResult(false, e.message); }
+    }
+    async function createTaskFromForm() {
+      try {
+        ensureWritableAction();
+        const payload = buildPatchFromForm();
         const r = await callApi(`${API_BASE}/task/create`, { payload });
         setResult(true, `created task ${r.data.id}`);
         await load();
       } catch (e) { setResult(false, e.message); }
     }
-    function renderTaskOptions() {
+    function renderTaskOptions(backgroundRefresh = false) {
       const select = document.getElementById('editTaskSelect');
       if (!select) return;
       const previous = select.value;
       const items = tasksCache || [];
       select.innerHTML = '';
+      const createOpt = document.createElement('option');
+      createOpt.value = '';
+      createOpt.textContent = 'Create new task...';
+      select.appendChild(createOpt);
       if (!items.length) {
-        const opt = document.createElement('option');
-        opt.value = '';
-        opt.textContent = 'No task available';
-        select.appendChild(opt);
         document.getElementById('originalTaskJson').value = '{}';
-        document.getElementById('editTaskPatchJson').value = '{}';
+        startCreateTask(false);
         return;
       }
       for (const task of items) {
@@ -336,8 +540,13 @@ HTML_PAGE = """<!doctype html>
         select.appendChild(opt);
       }
       const matched = items.some(t => String(t.id ?? '') === previous);
-      select.value = matched ? previous : String(items[0].id ?? '');
-      loadSelectedTaskPatch(false);
+      if (previous === '') {
+        select.value = '';
+      } else {
+        select.value = matched ? previous : String(items[0].id ?? '');
+      }
+      if (backgroundRefresh && taskFormDirty) return;
+      loadSelectedTask(false);
     }
     function buildEditablePatch(task) {
       const patch = {};
@@ -347,9 +556,33 @@ HTML_PAGE = """<!doctype html>
       }
       return patch;
     }
-    function loadSelectedTaskPatch(showMessage = true) {
+    function startCreateTask(showMessage = true) {
+      const select = document.getElementById('editTaskSelect');
+      if (select) select.value = '';
+      document.getElementById('originalTaskJson').value = '{}';
+      fillTaskForm({
+        name: '',
+        task_kind: 'scheduled',
+        cycle_type: 'once',
+        time_of_day: '',
+        start_date: '',
+        end_date: '',
+        delivery_target: '',
+        is_active: 1,
+        weekday: null,
+        interval_hours: null
+      });
+      taskFormDirty = false;
+      if (showMessage) setResult(true, 'switched to create mode');
+    }
+    function loadSelectedTask(showMessage = true) {
       const select = document.getElementById('editTaskSelect');
       const id = Number((select && select.value) || 0);
+      if (!id) {
+        startCreateTask(false);
+        if (showMessage) setResult(true, 'create mode');
+        return;
+      }
       const task = (tasksCache || []).find(t => Number(t.id) === id);
       if (!task) {
         if (showMessage) setResult(false, `task ${id} not found in current snapshot`);
@@ -358,20 +591,7 @@ HTML_PAGE = """<!doctype html>
       document.getElementById('originalTaskJson').value = JSON.stringify(task, null, 2);
       const patch = buildEditablePatch(task);
       fillTaskForm(patch);
-      document.getElementById('editTaskPatchJson').value = JSON.stringify(patch, null, 2);
-      document.getElementById('updateTaskId').value = String(id);
-      document.getElementById('removeTaskId').value = String(id);
-      document.getElementById('updateTaskJson').value = JSON.stringify(
-        {
-          name: patch.name,
-          cycle_type: patch.cycle_type,
-          time_of_day: patch.time_of_day,
-          delivery_target: patch.delivery_target,
-          is_active: patch.is_active
-        },
-        null,
-        2
-      );
+      taskFormDirty = false;
       if (showMessage) setResult(true, `loaded task ${id} for editing`);
     }
     function setFormValue(id, value) {
@@ -433,61 +653,22 @@ HTML_PAGE = """<!doctype html>
         if (!id) throw new Error('select a task first');
         const patch = buildPatchFromForm();
         const r = await callApi(`${API_BASE}/task/update`, { id, patch });
-        document.getElementById('editTaskPatchJson').value = JSON.stringify(patch, null, 2);
         setResult(true, `updated task ${r.data.id}`);
         await load();
       } catch (e) { setResult(false, e.message); }
     }
-    async function updateSelectedTask() {
+    async function removeSelectedTask(hard) {
       try {
         ensureWritableAction();
         const select = document.getElementById('editTaskSelect');
         const id = Number((select && select.value) || 0);
         if (!id) throw new Error('select a task first');
-        const patch = JSON.parse(document.getElementById('editTaskPatchJson').value);
-        const r = await callApi(`${API_BASE}/task/update`, { id, patch });
-        setResult(true, `updated task ${r.data.id}`);
-        await load();
-      } catch (e) { setResult(false, e.message); }
-    }
-    async function updateTask() {
-      try {
-        ensureWritableAction();
-        const id = Number(document.getElementById('updateTaskId').value.trim());
-        const patch = JSON.parse(document.getElementById('updateTaskJson').value);
-        const r = await callApi(`${API_BASE}/task/update`, { id, patch });
-        setResult(true, `updated task ${r.data.id}`);
-        await load();
-      } catch (e) { setResult(false, e.message); }
-    }
-    async function removeTask(hard) {
-      try {
-        ensureWritableAction();
-        const id = Number(document.getElementById('removeTaskId').value.trim());
         if (hard) {
           const sure = window.prompt(`Type DELETE-${id} to confirm hard deletion`);
           if (sure !== `DELETE-${id}`) throw new Error('hard delete cancelled');
         }
         await callApi(`${API_BASE}/task/remove`, { id, hard });
         setResult(true, hard ? `hard-deleted task ${id}` : `deactivated task ${id}`);
-        await load();
-      } catch (e) { setResult(false, e.message); }
-    }
-    async function putChannel() {
-      try {
-        ensureWritableAction();
-        const channel = JSON.parse(document.getElementById('channelJson').value);
-        await callApi(`${API_BASE}/channel/put`, { channel });
-        setResult(true, `upserted channel ${channel.id}`);
-        await load();
-      } catch (e) { setResult(false, e.message); }
-    }
-    async function removeChannel() {
-      try {
-        ensureWritableAction();
-        const id = document.getElementById('removeChannelId').value.trim();
-        await callApi(`${API_BASE}/channel/remove`, { id });
-        setResult(true, `removed channel ${id}`);
         await load();
       } catch (e) { setResult(false, e.message); }
     }
@@ -500,7 +681,7 @@ HTML_PAGE = """<!doctype html>
         await load();
       } catch (e) { setResult(false, e.message); }
     }
-    async function load() {
+    async function load(backgroundRefresh = false) {
       const res = await fetch(`${API_BASE}/snapshot`);
       const data = await res.json();
       document.getElementById('meta').textContent = `updated: ${data.generated_at} | today: ${data.today}`;
@@ -521,13 +702,16 @@ db_path: ${esc(s.db_path)}</pre>
         document.getElementById('legacyChatId').value = data.legacy_chat_id;
       }
       const channels = data.channels || [];
+      channelsCache = channels;
+      renderChannelOptions(backgroundRefresh);
       document.getElementById('channels').innerHTML = table(
-        ['id','type','enabled','config'],
+        ['id','type','enabled','config','actions'],
         channels.map(c => [
           esc(c.id),
           esc(c.type),
           esc(c.enabled),
-          `<pre>${esc(JSON.stringify(c.config || {}, null, 2))}</pre>`
+          `<pre>${esc(JSON.stringify(c.config || {}, null, 2))}</pre>`,
+          `<div class="btns"><button class="alt" onclick='selectChannelById(${JSON.stringify(String(c.id || ""))})'>Edit</button><button class="warn" onclick='removeSelectedChannel(${JSON.stringify(String(c.id || ""))})'>Remove</button></div>`
         ])
       );
       const today = data.today_tasks || [];
@@ -545,7 +729,7 @@ db_path: ${esc(s.db_path)}</pre>
       );
       const tasks = data.tasks || [];
       tasksCache = tasks;
-      renderTaskOptions();
+      renderTaskOptions(backgroundRefresh);
       document.getElementById('tasks').innerHTML = table(
         ['id','name','active','kind','cycle','time','delivery_target','source'],
         tasks.map(t => [
@@ -561,7 +745,7 @@ db_path: ${esc(s.db_path)}</pre>
       );
     }
     load();
-    setInterval(load, 30000);
+    setInterval(() => load(true), 30000);
   </script>
 </body>
 </html>
