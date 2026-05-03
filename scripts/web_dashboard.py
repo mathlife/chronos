@@ -51,7 +51,7 @@ HTML_PAGE = """<!doctype html>
     .ok { color:var(--ok); }
     .muted { color:var(--muted); }
     pre { margin:0; white-space:pre-wrap; word-break: break-word; font-size:12px; background:#f8fafc; border:1px solid #e8edf5; border-radius:10px; padding:8px; }
-    textarea,input { width:100%; border:1px solid #ced7e8; border-radius:8px; padding:8px; font-size:13px; }
+    textarea,input,select { width:100%; border:1px solid #ced7e8; border-radius:8px; padding:8px; font-size:13px; }
     textarea { min-height:90px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .row { display:grid; grid-template-columns: 1fr 1fr; gap:8px; }
     .btns { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
@@ -128,6 +128,75 @@ HTML_PAGE = """<!doctype html>
         </div>
         <label style="margin-top:8px; display:block;">Original task JSON (read-only)</label>
         <textarea id="originalTaskJson" readonly>{}</textarea>
+        <label style="margin-top:8px; display:block;">Structured editor (recommended)</label>
+        <div class="row">
+          <div>
+            <label>Task name</label>
+            <input id="taskFormName" placeholder="task name" />
+          </div>
+          <div>
+            <label>Task kind</label>
+            <select id="taskFormTaskKind">
+              <option value="scheduled">scheduled</option>
+              <option value="system">system</option>
+            </select>
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div>
+            <label>Cycle type</label>
+            <select id="taskFormCycleType">
+              <option value="once">once</option>
+              <option value="daily">daily</option>
+              <option value="hourly">hourly</option>
+              <option value="weekly">weekly</option>
+              <option value="monthly_fixed">monthly_fixed</option>
+              <option value="monthly_range">monthly_range</option>
+              <option value="monthly_n_times">monthly_n_times</option>
+              <option value="monthly_dates">monthly_dates</option>
+            </select>
+          </div>
+          <div>
+            <label>Time of day (activity start)</label>
+            <input id="taskFormTime" type="time" />
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div>
+            <label>Start date</label>
+            <input id="taskFormStartDate" type="date" />
+          </div>
+          <div>
+            <label>End date</label>
+            <input id="taskFormEndDate" type="date" />
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div>
+            <label>Weekday (0-6, weekly)</label>
+            <input id="taskFormWeekday" type="number" min="0" max="6" />
+          </div>
+          <div>
+            <label>Interval hours (1-24, hourly)</label>
+            <input id="taskFormIntervalHours" type="number" min="1" max="24" />
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div>
+            <label>Delivery target (comma-separated)</label>
+            <input id="taskFormDeliveryTarget" placeholder="tg-main,hook-main" />
+          </div>
+          <div>
+            <label>Active</label>
+            <select id="taskFormIsActive">
+              <option value="1">active</option>
+              <option value="0">inactive</option>
+            </select>
+          </div>
+        </div>
+        <div class="btns">
+          <button class="alt" onclick="updateSelectedTaskByForm()">Save structured editor</button>
+        </div>
         <label style="margin-top:8px; display:block;">Editable patch JSON (auto-filled from selected task)</label>
         <textarea id="editTaskPatchJson">{}</textarea>
         <div class="btns">
@@ -193,7 +262,9 @@ HTML_PAGE = """<!doctype html>
       const enabled = editingEnabled() && !serverReadOnly;
       const targets = [
         'legacyChatId','removeChannelId','channelJson','createTaskJson',
-        'editTaskSelect','editTaskPatchJson','updateTaskId','removeTaskId','updateTaskJson'
+        'editTaskSelect','editTaskPatchJson','updateTaskId','removeTaskId','updateTaskJson',
+        'taskFormName','taskFormTaskKind','taskFormCycleType','taskFormTime','taskFormStartDate',
+        'taskFormEndDate','taskFormDeliveryTarget','taskFormIsActive','taskFormWeekday','taskFormIntervalHours'
       ];
       for (const id of targets) {
         const el = document.getElementById(id);
@@ -286,6 +357,7 @@ HTML_PAGE = """<!doctype html>
       }
       document.getElementById('originalTaskJson').value = JSON.stringify(task, null, 2);
       const patch = buildEditablePatch(task);
+      fillTaskForm(patch);
       document.getElementById('editTaskPatchJson').value = JSON.stringify(patch, null, 2);
       document.getElementById('updateTaskId').value = String(id);
       document.getElementById('removeTaskId').value = String(id);
@@ -301,6 +373,70 @@ HTML_PAGE = """<!doctype html>
         2
       );
       if (showMessage) setResult(true, `loaded task ${id} for editing`);
+    }
+    function setFormValue(id, value) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.value = value == null ? '' : String(value);
+    }
+    function fillTaskForm(task) {
+      setFormValue('taskFormName', task.name || '');
+      setFormValue('taskFormTaskKind', task.task_kind || 'scheduled');
+      setFormValue('taskFormCycleType', task.cycle_type || 'once');
+      setFormValue('taskFormTime', task.time_of_day || '');
+      setFormValue('taskFormStartDate', task.start_date || '');
+      setFormValue('taskFormEndDate', task.end_date || '');
+      setFormValue('taskFormDeliveryTarget', task.delivery_target || '');
+      setFormValue('taskFormIsActive', String(task.is_active) === '0' ? '0' : '1');
+      setFormValue('taskFormWeekday', task.weekday);
+      setFormValue('taskFormIntervalHours', task.interval_hours);
+    }
+    function parseOptionalInt(id, min, max, fieldName) {
+      const raw = String(document.getElementById(id).value || '').trim();
+      if (!raw) return null;
+      const num = Number(raw);
+      if (!Number.isInteger(num)) throw new Error(`${fieldName} must be integer`);
+      if (num < min || num > max) throw new Error(`${fieldName} must be ${min}-${max}`);
+      return num;
+    }
+    function buildPatchFromForm() {
+      const name = String(document.getElementById('taskFormName').value || '').trim();
+      if (!name) throw new Error('task name is required');
+      const cycle_type = String(document.getElementById('taskFormCycleType').value || '').trim();
+      const task_kind = String(document.getElementById('taskFormTaskKind').value || '').trim();
+      const time_of_day = String(document.getElementById('taskFormTime').value || '').trim();
+      const start_date = String(document.getElementById('taskFormStartDate').value || '').trim();
+      const end_date = String(document.getElementById('taskFormEndDate').value || '').trim();
+      const delivery_target = String(document.getElementById('taskFormDeliveryTarget').value || '').trim();
+      const is_active = String(document.getElementById('taskFormIsActive').value || '1') === '1';
+      const weekday = parseOptionalInt('taskFormWeekday', 0, 6, 'weekday');
+      const interval_hours = parseOptionalInt('taskFormIntervalHours', 1, 24, 'interval_hours');
+      const patch = {
+        name,
+        cycle_type,
+        task_kind,
+        is_active,
+        start_date: start_date || null,
+        end_date: end_date || null,
+        delivery_target: delivery_target || null,
+        weekday,
+        interval_hours
+      };
+      if (time_of_day) patch.time_of_day = time_of_day;
+      return patch;
+    }
+    async function updateSelectedTaskByForm() {
+      try {
+        ensureWritableAction();
+        const select = document.getElementById('editTaskSelect');
+        const id = Number((select && select.value) || 0);
+        if (!id) throw new Error('select a task first');
+        const patch = buildPatchFromForm();
+        const r = await callApi(`${API_BASE}/task/update`, { id, patch });
+        document.getElementById('editTaskPatchJson').value = JSON.stringify(patch, null, 2);
+        setResult(true, `updated task ${r.data.id}`);
+        await load();
+      } catch (e) { setResult(false, e.message); }
     }
     async function updateSelectedTask() {
       try {
