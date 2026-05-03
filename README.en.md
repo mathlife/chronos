@@ -21,6 +21,11 @@ Chronos runtime no longer requires `openclaw` for normal scheduling/notification
 ```bash
 python3 skills/chronos/scripts/setup_config.py --interactive
 
+# Optional: migrate legacy workspace files into .Chonos/config layout (recommended once)
+python3 skills/chronos/scripts/migrate_workspace_layout.py
+python3 skills/chronos/scripts/migrate_workspace_layout.py --apply
+python3 skills/chronos/scripts/migrate_workspace_layout.py --apply --remove-source
+
 # Linux non-interactive bootstrap examples:
 # Telegram
 python3 skills/chronos/scripts/setup_config.py \

@@ -8,7 +8,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 
-_DEFAULT_WORKSPACE = Path.home() / ".Chonos" / "workspace"
 _PROJECT_LOCAL_WORKSPACE = PROJECT_ROOT / ".Chonos"
 _CONFIG_DIRNAME = "config"
 
@@ -24,7 +23,7 @@ def _explicit_workspace_candidates() -> list[Path]:
 
 def _workspace_candidates() -> list[Path]:
     candidates = _explicit_workspace_candidates()
-    candidates.extend([_PROJECT_LOCAL_WORKSPACE, _DEFAULT_WORKSPACE])
+    candidates.append(_PROJECT_LOCAL_WORKSPACE)
     return candidates
 
 
@@ -44,14 +43,10 @@ def resolve_workspace() -> Path:
                 return candidate
         return explicit_candidates[0]
 
-    for candidate in _workspace_candidates():
-        if any(db_path.exists() for db_path in _candidate_db_paths(candidate)):
-            return candidate
-
-    for candidate in _workspace_candidates():
-        if candidate.exists():
-            return candidate
-
+    if any(db_path.exists() for db_path in _candidate_db_paths(_PROJECT_LOCAL_WORKSPACE)):
+        return _PROJECT_LOCAL_WORKSPACE
+    if _PROJECT_LOCAL_WORKSPACE.exists():
+        return _PROJECT_LOCAL_WORKSPACE
     return _PROJECT_LOCAL_WORKSPACE
 
 

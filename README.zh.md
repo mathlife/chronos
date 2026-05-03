@@ -21,6 +21,11 @@ Chronos 是一个轻量级周期任务引擎，核心基于 `periodic_tasks` + `
 ```bash
 python3 skills/chronos/scripts/setup_config.py --interactive
 
+# 可选：将历史工作区文件迁移到 .Chonos/config 布局（建议执行一次）
+python3 skills/chronos/scripts/migrate_workspace_layout.py
+python3 skills/chronos/scripts/migrate_workspace_layout.py --apply
+python3 skills/chronos/scripts/migrate_workspace_layout.py --apply --remove-source
+
 # Linux 非交互初始化示例
 # Telegram
 python3 skills/chronos/scripts/setup_config.py \

@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import uuid
 from pathlib import Path
+from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -72,10 +73,13 @@ CREATE TABLE periodic_occurrences (
 
 
 def reset_db_singleton() -> None:
-    if db_module.DB._conn is not None:
-        db_module.DB._conn.close()
-    db_module.DB._conn = None
-    db_module.DB._instance = None
+    if hasattr(db_module.DB, "reset_for_tests"):
+        db_module.DB.reset_for_tests()
+    else:
+        if db_module.DB._conn is not None:
+            db_module.DB._conn.close()
+        db_module.DB._conn = None
+        db_module.DB._instance = None
     db_module.clear_task_cache()
 
 
@@ -169,8 +173,64 @@ def test_channel_flow() -> None:
             os.environ["CHRONOS_CONFIG_PATH"] = original_config_path
 
 
+def test_remove_task_failure_keeps_db_state() -> None:
+    db_path = make_case_dir("integration-remove-failure") / "todo.db"
+    prepare_temp_db(db_path)
+    paths_module.TODO_DB = db_path
+    db_module.TODO_DB = db_path
+    reset_db_singleton()
+
+    created = create_task(
+        {
+            "name": "Integration remove failure task",
+            "cycle_type": "daily",
+            "time_of_day": "09:00",
+            "task_kind": "scheduled",
+        }
+    )
+    task_id = int(created["id"])
+    db = db_module.DB()
+    db.execute(
+        """
+        INSERT INTO periodic_occurrences (task_id, date, status, reminder_job_id, scheduled_time, scheduled_at)
+        VALUES (?, '2026-05-03', 'pending', 'chronos_reminder_1', '09:00', '2026-05-03T09:00:00')
+        """,
+        (task_id,),
+    )
+    db_module.db_commit()
+
+    with mock.patch("core.integration_api.remove_job", side_effect=RuntimeError("crontab failure")):
+        try:
+            remove_task(task_id, hard=False)
+            raise AssertionError("expected remove_task failure")
+        except RuntimeError as exc:
+            assert "crontab failure" in str(exc)
+
+    task_row = db.execute("SELECT is_active FROM periodic_tasks WHERE id = ?", (task_id,)).fetchone()
+    assert task_row[0] == 1
+    occ_row = db.execute(
+        "SELECT status, reminder_job_id FROM periodic_occurrences WHERE task_id = ?",
+        (task_id,),
+    ).fetchone()
+    assert occ_row[0] == "pending"
+    assert occ_row[1] == "chronos_reminder_1"
+
+    op_row = db.execute(
+        "SELECT status, attempt_count FROM scheduler_operation_log WHERE task_id = ? ORDER BY created_at DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    assert op_row is not None
+    assert op_row[0] == "failed"
+    assert op_row[1] >= 1
+
+    db.close()
+    reset_db_singleton()
+
+
 if __name__ == "__main__":
     test_task_flow()
     print("[ok] integration API task flow")
     test_channel_flow()
     print("[ok] integration API channel flow")
+    test_remove_task_failure_keeps_db_state()
+    print("[ok] remove_task failure keeps DB state and records failed operation log")

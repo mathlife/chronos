@@ -69,10 +69,13 @@ CREATE TABLE periodic_occurrences (
 
 
 def reset_db_singleton() -> None:
-    if db_module.DB._conn is not None:
-        db_module.DB._conn.close()
-    db_module.DB._conn = None
-    db_module.DB._instance = None
+    if hasattr(db_module.DB, "reset_for_tests"):
+        db_module.DB.reset_for_tests()
+    else:
+        if db_module.DB._conn is not None:
+            db_module.DB._conn.close()
+        db_module.DB._conn = None
+        db_module.DB._instance = None
     db_module.clear_task_cache()
 
 

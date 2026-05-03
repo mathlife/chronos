@@ -88,10 +88,13 @@ CREATE TABLE periodic_occurrences (
 
 
 def reset_db_singleton() -> None:
-    if db_module.DB._conn is not None:
-        db_module.DB._conn.close()
-    db_module.DB._conn = None
-    db_module.DB._instance = None
+    if hasattr(db_module.DB, "reset_for_tests"):
+        db_module.DB.reset_for_tests()
+    else:
+        if db_module.DB._conn is not None:
+            db_module.DB._conn.close()
+        db_module.DB._conn = None
+        db_module.DB._instance = None
     db_module.clear_task_cache()
 
 
@@ -163,26 +166,26 @@ def test_mutation_ops() -> None:
     reset_db_singleton()
 
     created = handle_mutation(
-        "/api/task/create",
+        "/api/v1/task/create",
         {"payload": {"name": "web-created", "cycle_type": "once", "start_date": "2026-05-03", "time_of_day": "09:00"}},
     )
     task_id = int(created["id"])
     assert created["name"] == "web-created"
 
-    updated = handle_mutation("/api/task/update", {"id": task_id, "patch": {"cycle_type": "daily"}})
+    updated = handle_mutation("/api/v1/task/update", {"id": task_id, "patch": {"cycle_type": "daily"}})
     assert updated["cycle_type"] == "daily"
 
-    removed = handle_mutation("/api/task/remove", {"id": task_id, "hard": False})
+    removed = handle_mutation("/api/v1/task/remove", {"id": task_id, "hard": False})
     assert removed["id"] == task_id
 
     channel = handle_mutation(
-        "/api/channel/put",
+        "/api/v1/channel/put",
         {"channel": {"id": "hook-main", "type": "webhook", "enabled": True, "config": {"url": "https://example.com"}}},
     )
     assert channel["id"] == "hook-main"
-    handle_mutation("/api/channel/remove", {"id": "hook-main"})
+    handle_mutation("/api/v1/channel/remove", {"id": "hook-main"})
 
-    settings = handle_mutation("/api/settings/update", {"chat_id": "12345"})
+    settings = handle_mutation("/api/v1/settings/update", {"chat_id": "12345"})
     assert settings["chat_id"] == "12345"
 
     config_data = json.loads(config_path.read_text(encoding="utf-8"))

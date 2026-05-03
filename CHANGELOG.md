@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scripts/check_git_hygiene.sh` to fail fast when tracked `__pycache__` or `*.pyc` artifacts leak into the repo.
 - `core/openclaw_cron.py` helper to centralize OpenClaw cron add/remove command construction.
 - `core/integration_api.py` and `scripts/chronos_api.py` as JSON interfaces for external callers to manage periodic tasks and notification channels without relying on OpenClaw internals.
+- `scripts/migrate_workspace_layout.py` to migrate legacy `todo.db` / `config.json` into `.Chonos/config/` with dry-run/apply modes.
 - `scripts/schema_preflight.py` to verify the actual runtime DB, required tables, key constraints, duplicate occurrence groups, and invalid statuses before any schema migration.
 - `scripts/migrate_legacy_entries.py` for conservative Phase-2 migration of deterministic legacy recurring/system rows from `entries` into canonical task metadata.
 - `scripts/archive_legacy_entries.py` for the final conservative legacy cleanup step that marks migrated linked `entries` rows readonly+archived without deleting them.

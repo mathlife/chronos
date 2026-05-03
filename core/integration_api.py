@@ -3,15 +3,19 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
+import uuid
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from .config import get_raw_config, remove_channel, set_channels, upsert_channel
 from .db import DB, clear_task_cache, db_commit
 from .models import ALLOWED_CYCLE_TYPES
-from .system_scheduler import remove_job
+from .paths import PYTHON_BIN, SCRIPTS_DIR
+from .system_scheduler import build_job_command, create_once_job, remove_job
+from .timezones import get_shanghai_tz
 
 _TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
+SHANGHAI_TZ = get_shanghai_tz()
 
 TASK_MUTABLE_FIELDS = {
     "name",
@@ -173,6 +177,108 @@ def _validate_cycle_requirements(task_data: dict) -> None:
         raise ValueError("monthly_dates tasks require dates_list")
 
 
+def _begin_immediate(db: DB) -> None:
+    db.execute("BEGIN IMMEDIATE")
+
+
+def _record_scheduler_operation(db: DB, *, operation_id: str, task_id: int, operation: str, payload: dict) -> None:
+    db.execute(
+        """
+        INSERT INTO scheduler_operation_log (id, operation, task_id, payload, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'planned', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """,
+        (operation_id, operation, task_id, json.dumps(payload, ensure_ascii=False)),
+    )
+
+
+def _update_scheduler_operation(db: DB, *, operation_id: str, status: str, error: str | None = None, bump_attempt: bool = False) -> None:
+    if bump_attempt:
+        db.execute(
+            """
+            UPDATE scheduler_operation_log
+            SET status = ?, error = ?, attempt_count = attempt_count + 1, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (status, error, operation_id),
+        )
+        return
+    db.execute(
+        """
+        UPDATE scheduler_operation_log
+        SET status = ?, error = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (status, error, operation_id),
+    )
+
+
+def _normalize_row_dict(row: Any) -> dict:
+    return dict(row) if hasattr(row, "keys") else dict(row or {})
+
+
+def _remove_scheduled_jobs(rows: list[dict]) -> list[dict]:
+    removed: list[dict] = []
+    for row in rows:
+        row_payload = dict(row)
+        reminder_job_id = row_payload.get("reminder_job_id")
+        execution_job_id = row_payload.get("execution_job_id")
+        if reminder_job_id:
+            ok = remove_job(str(reminder_job_id))
+            if not ok:
+                raise RuntimeError(f"failed to remove reminder job {reminder_job_id}")
+            removed.append({"kind": "reminder", "job_name": str(reminder_job_id), "row": row_payload})
+        if execution_job_id:
+            ok = remove_job(str(execution_job_id))
+            if not ok:
+                raise RuntimeError(f"failed to remove execution job {execution_job_id}")
+            removed.append({"kind": "execution", "job_name": str(execution_job_id), "row": row_payload})
+    return removed
+
+
+def _build_run_at(row: dict, *, kind: str) -> datetime | None:
+    date_raw = str(row.get("date") or "").strip()
+    time_raw = str(row.get("scheduled_time") or row.get("time_of_day") or "").strip()
+    if not date_raw or not time_raw:
+        return None
+    try:
+        occ_date = date.fromisoformat(date_raw)
+    except ValueError:
+        return None
+    match = _TIME_RE.match(time_raw)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    execute_at = datetime(occ_date.year, occ_date.month, occ_date.day, hour, minute, tzinfo=SHANGHAI_TZ)
+    return execute_at - timedelta(minutes=5) if kind == "reminder" else execute_at
+
+
+def _recreate_removed_jobs(removed_jobs: list[dict]) -> list[str]:
+    errors: list[str] = []
+    script_path = SCRIPTS_DIR / "periodic_task_manager.py"
+    now = datetime.now(SHANGHAI_TZ)
+    for item in removed_jobs:
+        kind = str(item.get("kind") or "")
+        job_name = str(item.get("job_name") or "")
+        row = item.get("row") if isinstance(item.get("row"), dict) else {}
+        if not job_name:
+            continue
+        run_at = _build_run_at(row, kind=kind)
+        if run_at is None or run_at <= now:
+            # Past jobs cannot be restored meaningfully.
+            continue
+        occurrence_id = row.get("occurrence_id")
+        if occurrence_id is None:
+            continue
+        action = "--fire-reminder" if kind == "reminder" else "--run-system-task"
+        command = build_job_command(PYTHON_BIN, script_path, action, int(occurrence_id))
+        try:
+            create_once_job(job_name=job_name, command=command, run_at=run_at)
+        except Exception as exc:  # pragma: no cover - relies on host scheduler
+            errors.append(f"{job_name}:{exc}")
+    return errors
+
+
 def list_tasks(*, active_only: bool | None = None) -> list[dict]:
     db = DB()
     query = "SELECT * FROM periodic_tasks"
@@ -284,42 +390,94 @@ def remove_task(task_id: int, *, hard: bool = False) -> bool:
     if not current:
         return False
     db = DB()
+    operation_id = uuid.uuid4().hex
 
     rows = db.execute(
         """
-        SELECT reminder_job_id, execution_job_id
-        FROM periodic_occurrences
+        SELECT
+            o.id AS occurrence_id,
+            o.date,
+            o.scheduled_time,
+            o.reminder_job_id,
+            o.execution_job_id,
+            t.time_of_day
+        FROM periodic_occurrences o
+        JOIN periodic_tasks t ON t.id = o.task_id
         WHERE task_id = ? AND (reminder_job_id IS NOT NULL OR execution_job_id IS NOT NULL)
         """,
         (task_id,),
     ).fetchall()
-    for row in rows:
-        if row["reminder_job_id"]:
-            remove_job(row["reminder_job_id"])
-        if row["execution_job_id"]:
-            remove_job(row["execution_job_id"])
-    if hard:
-        db.execute(
-            "UPDATE periodic_occurrences SET reminder_job_id = NULL, execution_job_id = NULL WHERE task_id = ?",
-            (task_id,),
+    row_payloads = [_normalize_row_dict(row) for row in rows]
+    operation_payload = {
+        "hard": bool(hard),
+        "job_count": len(row_payloads),
+        "jobs": row_payloads,
+    }
+    _begin_immediate(db)
+    try:
+        _record_scheduler_operation(
+            db,
+            operation_id=operation_id,
+            task_id=task_id,
+            operation="remove_task_hard" if hard else "remove_task_soft",
+            payload=operation_payload,
         )
-    else:
-        db.execute(
-            """
-            UPDATE periodic_occurrences
-            SET reminder_job_id = NULL,
-                execution_job_id = NULL,
-                status = CASE WHEN status IN ('pending', 'reminded') THEN 'skipped' ELSE status END
-            WHERE task_id = ?
-            """,
-            (task_id,),
-        )
+        db_commit()
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
 
-    if hard:
-        db.execute("DELETE FROM periodic_tasks WHERE id = ?", (task_id,))
-    else:
-        db.execute("UPDATE periodic_tasks SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (task_id,))
-    db_commit()
+    removed_jobs: list[dict] = []
+    try:
+        removed_jobs = _remove_scheduled_jobs(row_payloads)
+
+        _begin_immediate(db)
+        try:
+            if hard:
+                db.execute(
+                    "UPDATE periodic_occurrences SET reminder_job_id = NULL, execution_job_id = NULL WHERE task_id = ?",
+                    (task_id,),
+                )
+            else:
+                db.execute(
+                    """
+                    UPDATE periodic_occurrences
+                    SET reminder_job_id = NULL,
+                        execution_job_id = NULL,
+                        status = CASE WHEN status IN ('pending', 'reminded') THEN 'skipped' ELSE status END
+                    WHERE task_id = ?
+                    """,
+                    (task_id,),
+                )
+
+            if hard:
+                db.execute("DELETE FROM periodic_tasks WHERE id = ?", (task_id,))
+            else:
+                db.execute("UPDATE periodic_tasks SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (task_id,))
+            _update_scheduler_operation(db, operation_id=operation_id, status="applied", error=None)
+            db_commit()
+        except Exception as exc:
+            db.execute("ROLLBACK")
+            raise RuntimeError(f"failed to update database state: {exc}") from exc
+    except Exception as exc:
+        compensation_errors = _recreate_removed_jobs(removed_jobs)
+        error_message = str(exc)
+        if compensation_errors:
+            error_message = f"{error_message}; compensation_failed={'; '.join(compensation_errors)}"
+        _begin_immediate(db)
+        try:
+            _update_scheduler_operation(
+                db,
+                operation_id=operation_id,
+                status="failed",
+                error=error_message,
+                bump_attempt=True,
+            )
+            db_commit()
+        except Exception:
+            db.execute("ROLLBACK")
+        raise RuntimeError(error_message) from exc
+
     clear_task_cache()
     return True
 

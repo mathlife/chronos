@@ -144,6 +144,7 @@ HTML_PAGE = """<!doctype html>
     </div>
   </div>
   <script>
+    const API_BASE = '/api/v1';
     const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
     function table(headers, rows) {
       if (!rows.length) return '<div class="muted">empty</div>';
@@ -209,7 +210,7 @@ HTML_PAGE = """<!doctype html>
       try {
         ensureWritableAction();
         const payload = JSON.parse(document.getElementById('createTaskJson').value);
-        const r = await callApi('/api/task/create', { payload });
+        const r = await callApi(`${API_BASE}/task/create`, { payload });
         setResult(true, `created task ${r.data.id}`);
         await load();
       } catch (e) { setResult(false, e.message); }
@@ -219,7 +220,7 @@ HTML_PAGE = """<!doctype html>
         ensureWritableAction();
         const id = Number(document.getElementById('updateTaskId').value.trim());
         const patch = JSON.parse(document.getElementById('updateTaskJson').value);
-        const r = await callApi('/api/task/update', { id, patch });
+        const r = await callApi(`${API_BASE}/task/update`, { id, patch });
         setResult(true, `updated task ${r.data.id}`);
         await load();
       } catch (e) { setResult(false, e.message); }
@@ -232,7 +233,7 @@ HTML_PAGE = """<!doctype html>
           const sure = window.prompt(`Type DELETE-${id} to confirm hard deletion`);
           if (sure !== `DELETE-${id}`) throw new Error('hard delete cancelled');
         }
-        await callApi('/api/task/remove', { id, hard });
+        await callApi(`${API_BASE}/task/remove`, { id, hard });
         setResult(true, hard ? `hard-deleted task ${id}` : `deactivated task ${id}`);
         await load();
       } catch (e) { setResult(false, e.message); }
@@ -241,7 +242,7 @@ HTML_PAGE = """<!doctype html>
       try {
         ensureWritableAction();
         const channel = JSON.parse(document.getElementById('channelJson').value);
-        await callApi('/api/channel/put', { channel });
+        await callApi(`${API_BASE}/channel/put`, { channel });
         setResult(true, `upserted channel ${channel.id}`);
         await load();
       } catch (e) { setResult(false, e.message); }
@@ -250,7 +251,7 @@ HTML_PAGE = """<!doctype html>
       try {
         ensureWritableAction();
         const id = document.getElementById('removeChannelId').value.trim();
-        await callApi('/api/channel/remove', { id });
+        await callApi(`${API_BASE}/channel/remove`, { id });
         setResult(true, `removed channel ${id}`);
         await load();
       } catch (e) { setResult(false, e.message); }
@@ -259,13 +260,13 @@ HTML_PAGE = """<!doctype html>
       try {
         ensureWritableAction();
         const chat_id = document.getElementById('legacyChatId').value.trim();
-        await callApi('/api/settings/update', { chat_id });
+        await callApi(`${API_BASE}/settings/update`, { chat_id });
         setResult(true, 'updated settings');
         await load();
       } catch (e) { setResult(false, e.message); }
     }
     async function load() {
-      const res = await fetch('/api/snapshot');
+      const res = await fetch(`${API_BASE}/snapshot`);
       const data = await res.json();
       document.getElementById('meta').textContent = `updated: ${data.generated_at} | today: ${data.today}`;
       const s = data.settings || {};
@@ -467,7 +468,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path in ("/", "/index.html"):
             self._write_html(HTML_PAGE)
             return
-        if parsed.path == "/api/snapshot":
+        normalized_path = _normalize_api_path(parsed.path)
+        if normalized_path == "/api/v1/snapshot":
             payload = build_snapshot(self.db_path, read_only=self.read_only_mode)
             self._write_json(payload)
             return
@@ -545,39 +547,89 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return data
 
 
+def _normalize_api_path(path: str) -> str:
+    clean = (path or "").strip()
+    if clean.startswith("/api/v1/"):
+        return clean
+    if clean.startswith("/api/"):
+        return "/api/v1/" + clean[len("/api/") :]
+    return clean
+
+
+def _expect_object(value: Any, *, field_name: str) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be an object")
+    return value
+
+
+def _parse_int_field(payload: dict, key: str, *, minimum: int | None = None) -> int:
+    value = payload.get(key)
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be an integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be an integer") from exc
+    if minimum is not None and parsed < minimum:
+        raise ValueError(f"{key} must be >= {minimum}")
+    return parsed
+
+
+def _parse_bool_field(payload: dict, key: str, *, default: bool = False) -> bool:
+    if key not in payload:
+        return default
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off", ""}:
+            return False
+    raise ValueError(f"{key} must be a boolean")
+
+
+def _parse_channel_id(payload: dict) -> str:
+    channel_id = str(payload.get("id") or "").strip()
+    if not channel_id:
+        raise ValueError("id is required")
+    return channel_id
+
+
 def handle_mutation(path: str, payload: dict) -> dict:
-    if path == "/api/task/create":
-        task_payload = payload.get("payload")
-        if not isinstance(task_payload, dict):
-            raise ValueError("payload must be an object")
+    normalized_path = _normalize_api_path(path)
+    payload = _expect_object(payload, field_name="request body")
+    if normalized_path == "/api/v1/task/create":
+        task_payload = _expect_object(payload.get("payload"), field_name="payload")
         return create_task(task_payload)
-    if path == "/api/task/update":
-        task_id = int(payload.get("id"))
-        patch = payload.get("patch")
-        if not isinstance(patch, dict):
-            raise ValueError("patch must be an object")
+    if normalized_path == "/api/v1/task/update":
+        task_id = _parse_int_field(payload, "id", minimum=1)
+        patch = _expect_object(payload.get("patch"), field_name="patch")
         return update_task(task_id, patch)
-    if path == "/api/task/remove":
-        task_id = int(payload.get("id"))
-        hard = bool(payload.get("hard", False))
+    if normalized_path == "/api/v1/task/remove":
+        task_id = _parse_int_field(payload, "id", minimum=1)
+        hard = _parse_bool_field(payload, "hard", default=False)
         removed = remove_task(task_id, hard=hard)
         if not removed:
             raise ValueError(f"task {task_id} not found")
         return {"id": task_id, "hard": hard}
-    if path == "/api/channel/put":
-        channel = payload.get("channel")
-        if not isinstance(channel, dict):
-            raise ValueError("channel must be an object")
-        return put_channel(channel)
-    if path == "/api/channel/remove":
-        channel_id = str(payload.get("id") or "").strip()
+    if normalized_path == "/api/v1/channel/put":
+        channel = _expect_object(payload.get("channel"), field_name="channel")
+        channel_id = str(channel.get("id") or "").strip()
+        channel_type = str(channel.get("type") or "").strip()
         if not channel_id:
-            raise ValueError("id is required")
+            raise ValueError("channel.id is required")
+        if not channel_type:
+            raise ValueError("channel.type is required")
+        return put_channel(channel)
+    if normalized_path == "/api/v1/channel/remove":
+        channel_id = _parse_channel_id(payload)
         removed = delete_channel(channel_id)
         if not removed:
             raise ValueError(f"channel {channel_id} not found")
         return {"id": channel_id}
-    if path == "/api/settings/update":
+    if normalized_path == "/api/v1/settings/update":
         chat_id = str(payload.get("chat_id") or "").strip()
         raw = get_raw_config()
         if chat_id:

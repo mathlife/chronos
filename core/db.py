@@ -1,5 +1,6 @@
 """Database layer with connection pooling and caching."""
 import sqlite3
+import threading
 from functools import lru_cache
 from typing import Optional
 
@@ -32,10 +33,36 @@ OCCURRENCE_SCHEMA_COLUMNS = {
     'execution_job_id': "ALTER TABLE periodic_occurrences ADD COLUMN execution_job_id TEXT",
 }
 
+SCHEDULER_OPERATION_LOG_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS scheduler_operation_log (
+    id TEXT PRIMARY KEY,
+    operation TEXT NOT NULL,
+    task_id INTEGER,
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+INDEX_CANDIDATES = (
+    ("periodic_occurrences", "CREATE INDEX IF NOT EXISTS idx_occurrences_date_status_task ON periodic_occurrences(date, status, task_id)"),
+    ("periodic_tasks", "CREATE INDEX IF NOT EXISTS idx_tasks_active_cycle ON periodic_tasks(is_active, cycle_type)"),
+    ("entries", "CREATE INDEX IF NOT EXISTS idx_entries_status_group ON entries(status, group_id)"),
+    ("periodic_tasks", "CREATE INDEX IF NOT EXISTS idx_tasks_legacy_entry ON periodic_tasks(legacy_entry_id)"),
+    ("scheduler_operation_log", "CREATE INDEX IF NOT EXISTS idx_scheduler_op_task_status ON scheduler_operation_log(task_id, status, created_at)"),
+)
+
 
 class DB:
     """Singleton database connection with query caching."""
     _instance: Optional['DB'] = None
+    _local = threading.local()
+    _schema_lock = threading.Lock()
+    _schema_ready = False
+    # Backward-compat alias used by local regression scripts.
     _conn: Optional[sqlite3.Connection] = None
 
     def __new__(cls):
@@ -44,32 +71,71 @@ class DB:
         return cls._instance
 
     def __init__(self):
-        if self._conn is None:
-            TODO_DB.parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(str(TODO_DB))
-            self._conn.row_factory = sqlite3.Row
+        # Connection is lazily created per thread in _get_conn.
+        return
+
+    def _create_connection(self) -> sqlite3.Connection:
+        TODO_DB.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(TODO_DB), timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            # Improves writer/reader concurrency on Linux sqlite.
+            conn.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.Error:
+            pass
+        return conn
+
+    def _get_conn(self) -> sqlite3.Connection:
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = self._create_connection()
+            self._local.conn = conn
+            DB._conn = conn
+            self._ensure_schema_once()
+        return conn
+
+    def _ensure_schema_once(self) -> None:
+        with DB._schema_lock:
+            if DB._schema_ready:
+                return
             try:
                 ensure_schema(self)
             except sqlite3.Error as exc:
                 print(f"Warning: failed to ensure schema: {exc}")
+            else:
+                DB._schema_ready = True
 
     def execute(self, query: str, params: tuple = ()):
-        cur = self._conn.cursor()
+        cur = self._get_conn().cursor()
         cur.execute(query, params)
         return cur
 
     def executemany(self, query: str, params_list: list):
-        cur = self._conn.cursor()
+        cur = self._get_conn().cursor()
         cur.executemany(query, params_list)
         return cur
 
     def commit(self):
-        self._conn.commit()
+        self._get_conn().commit()
 
     def close(self):
-        if self._conn:
-            self._conn.close()
-            self._conn = None
+        conn = getattr(self._local, "conn", None)
+        if conn:
+            conn.close()
+            self._local.conn = None
+            DB._conn = None
+
+    @classmethod
+    def reset_for_tests(cls) -> None:
+        conn = getattr(cls._local, "conn", None)
+        if conn:
+            conn.close()
+        cls._local.conn = None
+        cls._conn = None
+        cls._instance = None
+        cls._schema_ready = False
 
 
 # Convenience functions
@@ -123,6 +189,21 @@ def _get_table_sql(db: DB, table_name: str) -> str:
     return row[0] if row and row[0] else ""
 
 
+def _table_exists(db: DB, table_name: str) -> bool:
+    row = db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return bool(row)
+
+
+def _ensure_index_candidates(db: DB) -> None:
+    for table_name, statement in INDEX_CANDIDATES:
+        if _table_exists(db, table_name):
+            db.execute(statement)
+    db.commit()
+
+
 def _rebuild_occurrences_for_hourly(db: DB) -> None:
     sql = _get_table_sql(db, 'periodic_occurrences')
     if 'UNIQUE(task_id, date, scheduled_time)' in sql:
@@ -171,6 +252,7 @@ def _rebuild_occurrences_for_hourly(db: DB) -> None:
 def ensure_schema(db: Optional[DB] = None):
     """Ensure database schema has all phase-1 Chronos columns."""
     db = db or DB()
+    db.execute(SCHEDULER_OPERATION_LOG_TABLE_SQL)
 
     tasks_table = db.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='periodic_tasks'"
@@ -184,3 +266,4 @@ def ensure_schema(db: Optional[DB] = None):
     if occurrences_table:
         _ensure_table_columns(db, 'periodic_occurrences', OCCURRENCE_SCHEMA_COLUMNS)
         _rebuild_occurrences_for_hourly(db)
+    _ensure_index_candidates(db)
