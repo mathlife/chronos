@@ -55,6 +55,10 @@ class PeriodicTask:
         return self.cycle_type == 'monthly_n_times'
 
     @property
+    def is_monthly_quota_cycle(self) -> bool:
+        return self.cycle_type in ('monthly_n_times', 'monthly_range') and (self.n_per_month or 0) > 0
+
+    @property
     def is_hourly(self) -> bool:
         return self.cycle_type == 'hourly'
 

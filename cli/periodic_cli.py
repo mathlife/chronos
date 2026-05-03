@@ -82,6 +82,18 @@ def validate_add_params(args: argparse.Namespace) -> None:
     if args.system_command and args.special_handler and args.special_handler != "run_command":
         raise ValueError("--system-command cannot be combined with another special_handler")
 
+    # Canonicalize monthly aliases for unified downstream handling.
+    if args.cycle_type == "monthly_fixed":
+        args.cycle_type = "monthly_dates"
+        if not args.dates_list and args.day_of_month is not None:
+            args.dates_list = str(int(args.day_of_month))
+    elif args.cycle_type == "monthly_n_times":
+        args.cycle_type = "monthly_range"
+        if args.range_start is None:
+            args.range_start = 1
+        if args.range_end is None:
+            args.range_end = 31
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Chronos periodic task manager")

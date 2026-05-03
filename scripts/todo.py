@@ -30,6 +30,7 @@ from core.config import get_config_path
 from core.notifiers import dispatch_message
 from core.paths import PYTHON_BIN, SCRIPTS_DIR, TODO_DB, WORKSPACE
 from core.models import ALLOWED_CYCLE_TYPES
+from core.scheduler import resolve_monthly_quota_window
 from core.system_command_runner import execute_system_handler
 from core.system_scheduler import remove_job
 from scripts.subagent_sync_ledger import looks_like_subagent_session
@@ -111,6 +112,20 @@ def validate_add_args(args: argparse.Namespace) -> None:
         raise ValueError("--system-command requires --task-kind system")
     if args.system_command and args.special_handler and args.special_handler != 'run_command':
         raise ValueError("--system-command cannot be combined with another special_handler")
+
+    # Canonicalize monthly aliases for unified behavior:
+    # monthly_fixed -> monthly_dates(single day)
+    # monthly_n_times -> monthly_range(1-31) + n_per_month
+    if args.cycle_type == 'monthly_fixed':
+        args.cycle_type = 'monthly_dates'
+        if not args.dates_list and args.day_of_month is not None:
+            args.dates_list = str(int(args.day_of_month))
+    elif args.cycle_type == 'monthly_n_times':
+        args.cycle_type = 'monthly_range'
+        if args.range_start is None:
+            args.range_start = 1
+        if args.range_end is None:
+            args.range_end = 31
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -712,56 +727,83 @@ def complete_periodic_occurrence(
             select_columns.append('n_per_month')
         if 'count_current_month' in task_columns:
             select_columns.append('count_current_month')
+        if 'range_start' in task_columns:
+            select_columns.append('range_start')
+        if 'range_end' in task_columns:
+            select_columns.append('range_end')
+        column_index = {name: idx for idx, name in enumerate(select_columns)}
         cur.execute(f"SELECT {', '.join(select_columns)} FROM periodic_tasks WHERE id = ?", (task_id,))
         cycle_type_row = cur.fetchone()
         cycle_type = cycle_type_row[0] if cycle_type_row else None
-        if cycle_type == 'monthly_n_times':
+        n_per_month = cycle_type_row[column_index['n_per_month']] if cycle_type_row and 'n_per_month' in column_index else None
+        if cycle_type in ('monthly_n_times', 'monthly_range') and n_per_month is not None:
             if 'count_current_month' in task_columns:
                 cur.execute("UPDATE periodic_tasks SET count_current_month = count_current_month + 1 WHERE id = ?", (task_id,))
-            n_per_month = cycle_type_row[1] if cycle_type_row and 'n_per_month' in task_columns else None
-            current_count_index = 2 if 'n_per_month' in task_columns and 'count_current_month' in task_columns else 1
-            current_count = (cycle_type_row[current_count_index] if cycle_type_row and 'count_current_month' in task_columns else 0) or 0
-            if n_per_month is not None and current_count + 1 >= n_per_month:
-                quota_params: list[str | None] = [task_id, occurrence_date]
-                quota_sql = """
-                    UPDATE periodic_occurrences
-                    SET status = 'completed', is_auto_completed = 1,
-                        completion_mode = COALESCE(completion_mode, 'auto_quota')
-                """
-                if 'completion_source' in occurrence_columns:
-                    quota_sql += ",\n                        completion_source = COALESCE(completion_source, 'quota')"
-                if 'trigger_label' in occurrence_columns:
-                    quota_sql += ",\n                        trigger_label = COALESCE(trigger_label, 'monthly_quota')"
-                if 'trigger_command' in occurrence_columns:
-                    quota_sql += ",\n                        trigger_command = COALESCE(trigger_command, 'complete_periodic_occurrence')"
-                quota_sql += """
-                    WHERE task_id = ? AND status IN ('pending', 'reminded')
-                      AND strftime('%Y-%m', date) = strftime('%Y-%m', ?)
-                """
-                cur.execute(quota_sql, tuple(quota_params))
+            try:
+                quota_limit = int(n_per_month)
+            except (TypeError, ValueError):
+                quota_limit = 0
+            range_start = cycle_type_row[column_index['range_start']] if cycle_type_row and 'range_start' in column_index else None
+            range_end = cycle_type_row[column_index['range_end']] if cycle_type_row and 'range_end' in column_index else None
+            occ_day = date.fromisoformat(occurrence_date) if occurrence_date else datetime.now().date()
+            window = resolve_monthly_quota_window(
+                cycle_type=cycle_type or '',
+                target_day=occ_day,
+                range_start=range_start,
+                range_end=range_end,
+            )
+            if quota_limit > 0 and window:
+                win_start, win_end = window
                 cur.execute(
                     """
-                    SELECT reminder_job_id, execution_job_id, COALESCE(t.task_kind, 'scheduled')
-                    FROM periodic_occurrences o
-                    JOIN periodic_tasks t ON t.id = o.task_id
-                    WHERE o.task_id = ? AND o.status = 'completed'
-                      AND strftime('%Y-%m', o.date) = strftime('%Y-%m', ?)
-                      AND (o.reminder_job_id IS NOT NULL OR o.execution_job_id IS NOT NULL)
-                    """,
-                    (task_id, occurrence_date),
-                )
-                for quota_reminder_job_id, quota_execution_job_id, quota_task_kind in cur.fetchall():
-                    remove_job(quota_reminder_job_id)
-                    remove_job(quota_execution_job_id)
-                cur.execute(
-                    """
-                    UPDATE periodic_occurrences
-                    SET reminder_job_id = NULL, execution_job_id = NULL
+                    SELECT COUNT(1)
+                    FROM periodic_occurrences
                     WHERE task_id = ? AND status = 'completed'
-                      AND strftime('%Y-%m', date) = strftime('%Y-%m', ?)
+                      AND date >= ? AND date <= ?
                     """,
-                    (task_id, occurrence_date),
+                    (task_id, win_start.isoformat(), win_end.isoformat()),
                 )
+                completed_count = int((cur.fetchone() or [0])[0] or 0)
+                if completed_count >= quota_limit:
+                    quota_sql = """
+                        UPDATE periodic_occurrences
+                        SET status = 'completed', is_auto_completed = 1,
+                            completion_mode = COALESCE(completion_mode, 'auto_quota')
+                    """
+                    if 'completion_source' in occurrence_columns:
+                        quota_sql += ",\n                            completion_source = COALESCE(completion_source, 'quota')"
+                    if 'trigger_label' in occurrence_columns:
+                        quota_sql += ",\n                            trigger_label = COALESCE(trigger_label, 'monthly_quota')"
+                    if 'trigger_command' in occurrence_columns:
+                        quota_sql += ",\n                            trigger_command = COALESCE(trigger_command, 'complete_periodic_occurrence')"
+                    quota_sql += """
+                        WHERE task_id = ? AND status IN ('pending', 'reminded')
+                          AND date >= ? AND date <= ?
+                    """
+                    cur.execute(quota_sql, (task_id, win_start.isoformat(), win_end.isoformat()))
+                    cur.execute(
+                        """
+                        SELECT reminder_job_id, execution_job_id, COALESCE(t.task_kind, 'scheduled')
+                        FROM periodic_occurrences o
+                        JOIN periodic_tasks t ON t.id = o.task_id
+                        WHERE o.task_id = ? AND o.status = 'completed'
+                          AND o.date >= ? AND o.date <= ?
+                          AND (o.reminder_job_id IS NOT NULL OR o.execution_job_id IS NOT NULL)
+                        """,
+                        (task_id, win_start.isoformat(), win_end.isoformat()),
+                    )
+                    for quota_reminder_job_id, quota_execution_job_id, quota_task_kind in cur.fetchall():
+                        remove_job(quota_reminder_job_id)
+                        remove_job(quota_execution_job_id)
+                    cur.execute(
+                        """
+                        UPDATE periodic_occurrences
+                        SET reminder_job_id = NULL, execution_job_id = NULL
+                        WHERE task_id = ? AND status = 'completed'
+                          AND date >= ? AND date <= ?
+                        """,
+                        (task_id, win_start.isoformat(), win_end.isoformat()),
+                    )
 
         conn.commit()
     finally:

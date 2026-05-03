@@ -1,6 +1,7 @@
 """Periodic task domain service for scheduling and execution."""
 from __future__ import annotations
 
+import sqlite3
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -11,7 +12,7 @@ from core.models import PeriodicTask
 from core.notifiers import dispatch_message
 from core.observability import METRICS, emit_log
 from core.paths import PYTHON_BIN, SCRIPTS_DIR
-from core.scheduler import TaskScheduler, to_shanghai_date
+from core.scheduler import TaskScheduler, resolve_monthly_quota_window, to_shanghai_date
 from core.system_command_runner import execute_system_handler
 from core.system_scheduler import build_job_command, build_job_name, create_once_job, remove_job, supports_system_scheduler
 from core.timezones import get_shanghai_tz
@@ -79,6 +80,110 @@ class PeriodicTaskManager:
                 )
                 db_commit()
                 clear_task_cache()
+
+    @staticmethod
+    def _is_monthly_quota_task(task_row: dict | sqlite3.Row | tuple | None) -> bool:  # type: ignore[name-defined]
+        if not task_row:
+            return False
+        cycle_type = (task_row["cycle_type"] if hasattr(task_row, "keys") else task_row[0]) or ""
+        n_per_month = task_row["n_per_month"] if hasattr(task_row, "keys") else task_row[1]
+        try:
+            quota = int(n_per_month) if n_per_month is not None else 0
+        except (TypeError, ValueError):
+            quota = 0
+        return cycle_type in ("monthly_n_times", "monthly_range") and quota > 0
+
+    @staticmethod
+    def _quota_window_for_day(task_row: dict | sqlite3.Row | tuple, target_day: date) -> tuple[date, date] | None:  # type: ignore[name-defined]
+        cycle_type = (task_row["cycle_type"] if hasattr(task_row, "keys") else task_row[0]) or ""
+        range_start = task_row["range_start"] if hasattr(task_row, "keys") else task_row[3]
+        range_end = task_row["range_end"] if hasattr(task_row, "keys") else task_row[4]
+        return resolve_monthly_quota_window(
+            cycle_type=str(cycle_type),
+            target_day=target_day,
+            range_start=range_start,
+            range_end=range_end,
+        )
+
+    def _monthly_quota_reached(self, task: PeriodicTask, target_day: date) -> bool:
+        if not task.n_per_month or task.n_per_month <= 0:
+            return False
+        window = resolve_monthly_quota_window(
+            cycle_type=task.cycle_type,
+            target_day=target_day,
+            range_start=task.range_start,
+            range_end=task.range_end,
+        )
+        if not window:
+            return False
+        start_day, end_day = window
+        row = self.db.execute(
+            """
+            SELECT COUNT(1)
+            FROM periodic_occurrences
+            WHERE task_id = ? AND status = 'completed'
+              AND date >= ? AND date <= ?
+            """,
+            (task.id, start_day.isoformat(), end_day.isoformat()),
+        ).fetchone()
+        completed_count = int(row[0] if row and row[0] is not None else 0)
+        return completed_count >= int(task.n_per_month)
+
+    def _apply_monthly_quota_completion(self, *, task_id: int, occurrence_date: date, task_row: sqlite3.Row) -> None:  # type: ignore[name-defined]
+        if not self._is_monthly_quota_task(task_row):
+            return
+        n_per_month = int(task_row["n_per_month"])
+        window = self._quota_window_for_day(task_row, occurrence_date)
+        if not window:
+            return
+        start_day, end_day = window
+        count_row = self.db.execute(
+            """
+            SELECT COUNT(1)
+            FROM periodic_occurrences
+            WHERE task_id = ? AND status = 'completed'
+              AND date >= ? AND date <= ?
+            """,
+            (task_id, start_day.isoformat(), end_day.isoformat()),
+        ).fetchone()
+        completed_count = int(count_row[0] if count_row and count_row[0] is not None else 0)
+        if completed_count < n_per_month:
+            return
+
+        self.db.execute(
+            """
+            UPDATE periodic_occurrences
+            SET status = 'completed', is_auto_completed = 1,
+                completion_mode = COALESCE(completion_mode, 'auto_quota')
+            WHERE task_id = ? AND status IN ('pending', 'reminded')
+              AND date >= ? AND date <= ?
+            """,
+            (task_id, start_day.isoformat(), end_day.isoformat()),
+        )
+        cleanup_rows = self.db.execute(
+            """
+            SELECT reminder_job_id, execution_job_id
+            FROM periodic_occurrences
+            WHERE task_id = ? AND status = 'completed'
+              AND date >= ? AND date <= ?
+              AND (reminder_job_id IS NOT NULL OR execution_job_id IS NOT NULL)
+            """,
+            (task_id, start_day.isoformat(), end_day.isoformat()),
+        ).fetchall()
+        for reminder_job_name, execution_job_name in cleanup_rows:
+            if reminder_job_name:
+                remove_job(reminder_job_name)
+            if execution_job_name:
+                remove_job(execution_job_name)
+        self.db.execute(
+            """
+            UPDATE periodic_occurrences
+            SET reminder_job_id = NULL, execution_job_id = NULL
+            WHERE task_id = ? AND status = 'completed'
+              AND date >= ? AND date <= ?
+            """,
+            (task_id, start_day.isoformat(), end_day.isoformat()),
+        )
 
     def create_occurrence_if_missing(self, task_id: int, occ_date: date, scheduled_time: str | None = None) -> int:
         task = get_periodic_task(task_id)
@@ -197,49 +302,21 @@ class PeriodicTaskManager:
         if row:
             task_id = row[0]
             cycle_type_row = self.db.execute(
-                "SELECT cycle_type, n_per_month, count_current_month FROM periodic_tasks WHERE id = ?",
+                "SELECT cycle_type, n_per_month, count_current_month, range_start, range_end FROM periodic_tasks WHERE id = ?",
                 (task_id,),
             ).fetchone()
             if cycle_type_row and cycle_type_row[0] == 'monthly_n_times':
                 self.db.execute("UPDATE periodic_tasks SET count_current_month = count_current_month + 1 WHERE id = ?", (task_id,))
-                n_per_month = cycle_type_row[1]
-                current_count = cycle_type_row[2] or 0
-                if n_per_month is not None and current_count + 1 >= n_per_month:
-                    self.db.execute(
-                        """
-                        UPDATE periodic_occurrences
-                        SET status = 'completed', is_auto_completed = 1,
-                            completion_mode = COALESCE(completion_mode, 'auto_quota')
-                        WHERE task_id = ? AND status IN ('pending', 'reminded')
-                          AND strftime('%Y-%m', date) = strftime('%Y-%m', 'now', 'localtime')
-                        """,
-                        (task_id,),
-                    )
-                    cleanup_rows = self.db.execute(
-                        """
-                        SELECT reminder_job_id, execution_job_id
-                        FROM periodic_occurrences
-                        WHERE task_id = ? AND status = 'completed'
-                          AND strftime('%Y-%m', date) = strftime('%Y-%m', 'now', 'localtime')
-                          AND (reminder_job_id IS NOT NULL OR execution_job_id IS NOT NULL)
-                        """,
-                        (task_id,),
-                    ).fetchall()
-                    for reminder_job_name, execution_job_name in cleanup_rows:
-                        if reminder_job_name:
-                            remove_job(reminder_job_name)
-                        if execution_job_name:
-                            remove_job(execution_job_name)
-                    self.db.execute(
-                        """
-                        UPDATE periodic_occurrences
-                        SET reminder_job_id = NULL, execution_job_id = NULL
-                        WHERE task_id = ? AND status = 'completed'
-                          AND strftime('%Y-%m', date) = strftime('%Y-%m', 'now', 'localtime')
-                        """,
-                        (task_id,),
-                    )
-                db_commit()
+            occ_row = self.db.execute("SELECT date FROM periodic_occurrences WHERE id = ?", (occurrence_id,)).fetchone()
+            if occ_row and occ_row[0]:
+                try:
+                    occ_day = date.fromisoformat(str(occ_row[0]))
+                except ValueError:
+                    occ_day = to_shanghai_date()
+            else:
+                occ_day = to_shanghai_date()
+            self._apply_monthly_quota_completion(task_id=task_id, occurrence_date=occ_day, task_row=cycle_type_row)
+            db_commit()
         return True
 
     def _skip_occurrence_internal(
@@ -496,21 +573,17 @@ class PeriodicTaskManager:
                 self.complete_occurrence(occ_id)
                 affected += 1
 
-            if task.cycle_type == 'monthly_n_times':
-                updated_task = PeriodicTask(**(get_periodic_task(task_id) or {}))
-                if updated_task.count_current_month >= (updated_task.n_per_month or 0):
-                    cur = self.db.execute(
-                        """
-                        UPDATE periodic_occurrences
-                        SET status = 'completed', is_auto_completed = 1,
-                            completion_mode = COALESCE(completion_mode, 'auto_quota')
-                        WHERE task_id = ? AND status = 'pending'
-                          AND strftime('%Y-%m', date) = ?
-                        """,
-                        (task_id, today.strftime('%Y-%m')),
-                    )
-                    affected += cur.rowcount
-                    db_commit()
+            updated_task_dict = get_periodic_task(task_id) or {}
+            if updated_task_dict:
+                updated_task = PeriodicTask(**updated_task_dict)
+                if self._monthly_quota_reached(updated_task, today):
+                    task_row = self.db.execute(
+                        "SELECT cycle_type, n_per_month, count_current_month, range_start, range_end FROM periodic_tasks WHERE id = ?",
+                        (task_id,),
+                    ).fetchone()
+                    if task_row:
+                        self._apply_monthly_quota_completion(task_id=task_id, occurrence_date=today, task_row=task_row)
+                        db_commit()
 
             cur = self.db.execute(
                 """
@@ -566,6 +639,8 @@ class PeriodicTaskManager:
             scheduler = TaskScheduler(task, today)
 
             if not scheduler.should_remind_today():
+                continue
+            if self._monthly_quota_reached(task, today):
                 continue
 
             schedule_times = scheduler.get_hourly_schedule_for_day(today) if task.cycle_type == 'hourly' else [task.time_of_day]

@@ -27,6 +27,66 @@ def is_same_month(d1: date, d2: date) -> bool:
     return d1.year == d2.year and d1.month == d2.month
 
 
+def _month_add(year: int, month: int, delta: int) -> tuple[int, int]:
+    index = (year * 12 + (month - 1)) + delta
+    next_year = index // 12
+    next_month = index % 12 + 1
+    return next_year, next_month
+
+
+def _month_first_day(target: date) -> date:
+    return date(target.year, target.month, 1)
+
+
+def _month_last_day(target: date) -> date:
+    days = calendar.monthrange(target.year, target.month)[1]
+    return date(target.year, target.month, days)
+
+
+def resolve_monthly_quota_window(
+    *,
+    cycle_type: str,
+    target_day: date,
+    range_start: int | None = None,
+    range_end: int | None = None,
+) -> tuple[date, date] | None:
+    """Return the quota window [start, end] for monthly quota cycles.
+
+    - monthly_n_times: natural month window
+    - monthly_range: configured range window (supports cross-month when start > end)
+    """
+    if cycle_type == "monthly_n_times":
+        return _month_first_day(target_day), _month_last_day(target_day)
+    if cycle_type != "monthly_range":
+        return None
+    if range_start is None or range_end is None:
+        return None
+
+    year = target_day.year
+    month = target_day.month
+
+    if range_start <= range_end:
+        try:
+            return date(year, month, range_start), date(year, month, range_end)
+        except ValueError:
+            return None
+
+    try:
+        if target_day.day >= range_start:
+            start = date(year, month, range_start)
+            ny, nm = _month_add(year, month, 1)
+            end = date(ny, nm, range_end)
+            return start, end
+        if target_day.day <= range_end:
+            py, pm = _month_add(year, month, -1)
+            start = date(py, pm, range_start)
+            end = date(year, month, range_end)
+            return start, end
+    except ValueError:
+        return None
+    return None
+
+
 @lru_cache(maxsize=128)
 def get_weekdays_in_month(year: int, month: int, weekday: int) -> List[date]:
     """Return all dates in month matching weekday (0=Monday)."""
@@ -87,23 +147,17 @@ class TaskScheduler:
                 return False
             return today.weekday() == self.task.weekday
 
-        if self.task.cycle_type == 'monthly_fixed':
-            if self.task.day_of_month is None:
-                return False
-            return today.day == self.task.day_of_month
-
-        if self.task.cycle_type == 'monthly_range':
-            return self._in_monthly_range(today)
-
-        if self.task.cycle_type == 'monthly_n_times':
-            if self.task.weekday is not None and today.weekday() != self.task.weekday:
-                return False
-            if self.task.count_current_month >= (self.task.n_per_month or 0):
-                return False
-            return True
-
-        if self.task.cycle_type == 'monthly_dates':
+        if self.task.cycle_type in ('monthly_fixed', 'monthly_dates'):
             return today in self._get_monthly_dates(today.year, today.month)
+
+        if self.task.cycle_type in ('monthly_range', 'monthly_n_times'):
+            if not self._matches_monthly_window(today):
+                return False
+            # Legacy counter is kept for backward compatibility on monthly_n_times.
+            if self.task.cycle_type == 'monthly_n_times':
+                if self.task.count_current_month >= (self.task.n_per_month or 0):
+                    return False
+            return True
 
         return False
 
@@ -160,19 +214,20 @@ class TaskScheduler:
         return self._get_hourly_schedule_for_day(target_day)
 
     def _get_monthly_dates(self, year: int, month: int) -> List[date]:
-        if not self.task.dates_list:
-            return []
         days: List[int] = []
-        for chunk in str(self.task.dates_list).split(','):
-            chunk = chunk.strip()
-            if not chunk:
-                continue
-            try:
-                day = int(chunk)
-            except ValueError:
-                continue
-            if 1 <= day <= 31:
-                days.append(day)
+        if self.task.cycle_type == "monthly_fixed" and self.task.day_of_month is not None:
+            days.append(int(self.task.day_of_month))
+        if self.task.dates_list:
+            for chunk in str(self.task.dates_list).split(','):
+                chunk = chunk.strip()
+                if not chunk:
+                    continue
+                try:
+                    day = int(chunk)
+                except ValueError:
+                    continue
+                if 1 <= day <= 31:
+                    days.append(day)
         unique_days = sorted(set(days))
         results: List[date] = []
         for day in unique_days:
@@ -219,6 +274,19 @@ class TaskScheduler:
 
         return False
 
+    def _matches_monthly_window(self, today: date) -> bool:
+        if self.task.cycle_type == "monthly_n_times":
+            if self.task.weekday is not None and today.weekday() != self.task.weekday:
+                return False
+            return True
+        if self.task.cycle_type != "monthly_range":
+            return False
+        if not self._in_monthly_range(today):
+            return False
+        if self.task.weekday is not None and today.weekday() != self.task.weekday:
+            return False
+        return True
+
     def get_occurrences_for_month(self, year: int, month: int) -> List[date]:
         """Generate all occurrence dates for the given month, respecting start/end date."""
         cycle_type = self.task.cycle_type
@@ -243,37 +311,16 @@ class TaskScheduler:
                 return []
             dates = get_weekdays_in_month(year, month, self.task.weekday)
 
-        elif cycle_type == 'monthly_fixed':
-            day = self.task.day_of_month
-            if day is None:
-                return []
-            try:
-                dates = [date(year, month, day)]
-            except ValueError:
-                dates = []
+        elif cycle_type in ('monthly_fixed', 'monthly_dates'):
+            dates = self._get_monthly_dates(year, month)
 
-        elif cycle_type == 'monthly_range':
-            start = self.task.range_start
-            end = self.task.range_end
-            if start is None or end is None:
-                return []
-
+        elif cycle_type in ('monthly_range', 'monthly_n_times'):
             days_in_month = calendar.monthrange(year, month)[1]
             dates = [
                 current
                 for current in (date(year, month, day) for day in range(1, days_in_month + 1))
-                if self._in_monthly_range(current)
+                if self._matches_monthly_window(current)
             ]
-
-        elif cycle_type == 'monthly_n_times':
-            if self.task.weekday is None:
-                days_in_month = calendar.monthrange(year, month)[1]
-                dates = [date(year, month, d) for d in range(1, days_in_month + 1)]
-            else:
-                dates = get_weekdays_in_month(year, month, self.task.weekday)
-
-        elif cycle_type == 'monthly_dates':
-            dates = self._get_monthly_dates(year, month)
 
         else:
             return []
@@ -294,7 +341,7 @@ class TaskScheduler:
         done_dates = {d for d, s in existing_occurrences if s in ('completed', 'skipped')}
         pending_dates = [d for d in all_dates if d not in done_dates]
 
-        if self.task.cycle_type == 'monthly_n_times':
+        if self.task.cycle_type in ('monthly_n_times', 'monthly_range') and (self.task.n_per_month or 0) > 0:
             count_current = self.task.count_current_month
             n = self.task.n_per_month or 0
             allowed = max(0, n - count_current)

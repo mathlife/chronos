@@ -108,6 +108,41 @@ def test_task_flow() -> None:
     reset_db_singleton(db_module)
 
 
+def test_monthly_cycle_canonicalization() -> None:
+    db_path = make_case_dir("integration-monthly-canonical") / "todo.db"
+    prepare_temp_db(db_path)
+    paths_module.TODO_DB = db_path
+    db_module.TODO_DB = db_path
+    reset_db_singleton(db_module)
+
+    fixed = create_task(
+        {
+            "name": "monthly fixed alias",
+            "cycle_type": "monthly_fixed",
+            "day_of_month": 10,
+            "time_of_day": "09:00",
+        }
+    )
+    assert fixed["cycle_type"] == "monthly_dates"
+    assert fixed["dates_list"] == "10"
+
+    quota = create_task(
+        {
+            "name": "monthly n alias",
+            "cycle_type": "monthly_n_times",
+            "n_per_month": 3,
+            "time_of_day": "09:00",
+        }
+    )
+    assert quota["cycle_type"] == "monthly_range"
+    assert quota["range_start"] == 1
+    assert quota["range_end"] == 31
+    assert quota["n_per_month"] == 3
+
+    db_module.DB().close()
+    reset_db_singleton(db_module)
+
+
 def test_channel_flow() -> None:
     config_path = make_case_dir("integration-channel") / "chronos-config.json"
     original_config_path = os.environ.get("CHRONOS_CONFIG_PATH")
@@ -267,6 +302,8 @@ def test_remove_task_without_scheduler_still_updates_db() -> None:
 if __name__ == "__main__":
     test_task_flow()
     print("[ok] integration API task flow")
+    test_monthly_cycle_canonicalization()
+    print("[ok] monthly cycle aliases are canonicalized")
     test_channel_flow()
     print("[ok] integration API channel flow")
     test_remove_task_failure_keeps_db_state()

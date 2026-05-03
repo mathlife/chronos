@@ -146,6 +146,22 @@ def _normalize_task_payload(payload: dict, *, partial: bool) -> dict:
     if "is_active" in normalized and normalized["is_active"] is not None:
         normalized["is_active"] = 1 if bool(normalized["is_active"]) else 0
 
+    # Canonicalize legacy monthly aliases to a unified internal model:
+    # - monthly_fixed -> monthly_dates(single day)
+    # - monthly_n_times -> monthly_range(full month) with n_per_month quota
+    cycle_type = normalized.get("cycle_type")
+    if cycle_type == "monthly_fixed":
+        day = normalized.get("day_of_month")
+        if day is not None and not normalized.get("dates_list"):
+            normalized["dates_list"] = str(int(day))
+        normalized["cycle_type"] = "monthly_dates"
+    elif cycle_type == "monthly_n_times":
+        normalized["cycle_type"] = "monthly_range"
+        if normalized.get("range_start") is None:
+            normalized["range_start"] = 1
+        if normalized.get("range_end") is None:
+            normalized["range_end"] = 31
+
     system_command = normalized.pop("system_command", None)
     if system_command is not None:
         command = str(system_command).strip()
@@ -168,11 +184,13 @@ def _validate_cycle_requirements(task_data: dict) -> None:
     if cycle_type == "weekly" and task_data.get("weekday") is None:
         raise ValueError("weekly tasks require weekday")
     if cycle_type == "monthly_fixed" and task_data.get("day_of_month") is None:
+        # Legacy compatibility. New writes are normalized to monthly_dates.
         raise ValueError("monthly_fixed tasks require day_of_month")
     if cycle_type == "monthly_range":
         if task_data.get("range_start") is None or task_data.get("range_end") is None:
             raise ValueError("monthly_range tasks require range_start and range_end")
     if cycle_type == "monthly_n_times" and task_data.get("n_per_month") is None:
+        # Legacy compatibility. New writes are normalized to monthly_range + n_per_month.
         raise ValueError("monthly_n_times tasks require n_per_month")
     if cycle_type == "monthly_dates" and not task_data.get("dates_list"):
         raise ValueError("monthly_dates tasks require dates_list")
