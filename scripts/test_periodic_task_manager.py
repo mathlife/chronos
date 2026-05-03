@@ -2,18 +2,16 @@
 """Focused regression checks for Chronos periodic task manager."""
 import sqlite3
 import sys
-import uuid
 from pathlib import Path
 from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-TMP_ROOT = PROJECT_ROOT / ".tmp_tests"
-TMP_ROOT.mkdir(parents=True, exist_ok=True)
 
 from core import db as db_module
 from core import paths as paths_module
 from scripts import periodic_task_manager as ptm_module
+from scripts.test_helpers import make_case_dir, reset_db_singleton
 
 
 SCHEMA_SQL = """
@@ -68,17 +66,6 @@ CREATE TABLE periodic_occurrences (
 """
 
 
-def reset_db_singleton() -> None:
-    if hasattr(db_module.DB, "reset_for_tests"):
-        db_module.DB.reset_for_tests()
-    else:
-        if db_module.DB._conn is not None:
-            db_module.DB._conn.close()
-        db_module.DB._conn = None
-        db_module.DB._instance = None
-    db_module.clear_task_cache()
-
-
 def prepare_temp_db(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
@@ -86,19 +73,12 @@ def prepare_temp_db(db_path: Path) -> None:
     conn.commit()
     conn.close()
 
-
-def make_case_dir(case_name: str) -> Path:
-    case_dir = TMP_ROOT / f"{case_name}-{uuid.uuid4().hex}"
-    case_dir.mkdir(parents=True, exist_ok=True)
-    return case_dir
-
-
 def test_fire_reminder_occurrence() -> None:
     db_path = make_case_dir("fire-reminder") / "todo.db"
     prepare_temp_db(db_path)
     paths_module.TODO_DB = db_path
     db_module.TODO_DB = db_path
-    reset_db_singleton()
+    reset_db_singleton(db_module)
 
     manager = ptm_module.PeriodicTaskManager()
     manager.db.execute(
@@ -123,7 +103,7 @@ def test_fire_reminder_occurrence() -> None:
     row = manager.db.execute("SELECT status FROM periodic_occurrences WHERE id = 1").fetchone()
     assert row[0] == "reminded"
     manager.db.close()
-    reset_db_singleton()
+    reset_db_singleton(db_module)
 
 
 def test_run_system_occurrence_marks_completed() -> None:
@@ -131,14 +111,14 @@ def test_run_system_occurrence_marks_completed() -> None:
     prepare_temp_db(db_path)
     paths_module.TODO_DB = db_path
     db_module.TODO_DB = db_path
-    reset_db_singleton()
+    reset_db_singleton(db_module)
 
     manager = ptm_module.PeriodicTaskManager()
     manager.db.execute(
         """
         INSERT INTO periodic_tasks
         (id, name, category, cycle_type, time_of_day, timezone, is_active, count_current_month, task_kind, source, special_handler, handler_payload, created_at, updated_at)
-        VALUES (1, 'Refresh cache', 'System', 'daily', '09:30', 'Asia/Shanghai', 1, 0, 'system', 'chronos', 'run_command', '{"command":"echo ok"}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        VALUES (1, 'Refresh cache', 'System', 'daily', '09:30', 'Asia/Shanghai', 1, 0, 'system', 'chronos', 'run_command', '{"command_id":"echo","args":["ok"]}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         """
     )
     manager.db.execute(
@@ -151,7 +131,7 @@ def test_run_system_occurrence_marks_completed() -> None:
     db_module.db_commit()
 
     completed_process = mock.Mock(returncode=0, stdout="ok", stderr="")
-    with mock.patch.object(ptm_module.subprocess, "run", return_value=completed_process):
+    with mock.patch("core.system_command_runner.subprocess.run", return_value=completed_process):
         assert manager.run_system_occurrence(1) is True
 
     row = manager.db.execute(
@@ -163,7 +143,42 @@ def test_run_system_occurrence_marks_completed() -> None:
     assert row[3] is None
     assert row[4] is None
     manager.db.close()
-    reset_db_singleton()
+    reset_db_singleton(db_module)
+
+
+def test_run_system_occurrence_blocks_legacy_shell_payload() -> None:
+    db_path = make_case_dir("run-system-block-legacy") / "todo.db"
+    prepare_temp_db(db_path)
+    paths_module.TODO_DB = db_path
+    db_module.TODO_DB = db_path
+    reset_db_singleton(db_module)
+
+    manager = ptm_module.PeriodicTaskManager()
+    manager.db.execute(
+        """
+        INSERT INTO periodic_tasks
+        (id, name, category, cycle_type, time_of_day, timezone, is_active, count_current_month, task_kind, source, special_handler, handler_payload, created_at, updated_at)
+        VALUES (1, 'Legacy shell', 'System', 'daily', '09:30', 'Asia/Shanghai', 1, 0, 'system', 'chronos', 'run_command', '{"command":"echo legacy"}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """
+    )
+    manager.db.execute(
+        """
+        INSERT INTO periodic_occurrences
+        (id, task_id, date, status, reminder_job_id, execution_job_id, scheduled_time, scheduled_at)
+        VALUES (1, 1, '2026-05-03', 'pending', 'reminder-1', 'execute-1', '09:30', '2026-05-03T09:30:00')
+        """
+    )
+    db_module.db_commit()
+
+    assert manager.run_system_occurrence(1) is True
+    row = manager.db.execute(
+        "SELECT status, completion_mode, special_handler_result FROM periodic_occurrences WHERE id = 1"
+    ).fetchone()
+    assert row[0] == "completed"
+    assert row[1] == "system_scheduler"
+    assert "blocked=" in (row[2] or "")
+    manager.db.close()
+    reset_db_singleton(db_module)
 
 
 if __name__ == "__main__":
@@ -171,3 +186,5 @@ if __name__ == "__main__":
     print("[ok] fire_reminder_occurrence marks pending occurrence as reminded")
     test_run_system_occurrence_marks_completed()
     print("[ok] run_system_occurrence marks system command occurrence completed")
+    test_run_system_occurrence_blocks_legacy_shell_payload()
+    print("[ok] run_system_occurrence blocks legacy shell payload")

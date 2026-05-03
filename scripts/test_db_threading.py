@@ -5,33 +5,14 @@ from __future__ import annotations
 import sqlite3
 import sys
 import threading
-import uuid
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-TMP_ROOT = PROJECT_ROOT / ".tmp_tests"
-TMP_ROOT.mkdir(parents=True, exist_ok=True)
 
 from core import db as db_module
 from core import paths as paths_module
-
-
-def reset_db_singleton() -> None:
-    if hasattr(db_module.DB, "reset_for_tests"):
-        db_module.DB.reset_for_tests()
-    else:
-        if db_module.DB._conn is not None:
-            db_module.DB._conn.close()
-        db_module.DB._conn = None
-        db_module.DB._instance = None
-    db_module.clear_task_cache()
-
-
-def make_case_dir(case_name: str) -> Path:
-    case_dir = TMP_ROOT / f"{case_name}-{uuid.uuid4().hex}"
-    case_dir.mkdir(parents=True, exist_ok=True)
-    return case_dir
+from scripts.test_helpers import make_case_dir, reset_db_singleton
 
 
 def prepare_db(db_path: Path) -> None:
@@ -54,7 +35,7 @@ def test_multithread_insert() -> None:
     prepare_db(db_path)
     paths_module.TODO_DB = db_path
     db_module.TODO_DB = db_path
-    reset_db_singleton()
+    reset_db_singleton(db_module)
 
     errors: list[Exception] = []
     error_lock = threading.Lock()
@@ -87,7 +68,7 @@ def test_multithread_insert() -> None:
     conn.close()
     assert count == 60
 
-    reset_db_singleton()
+    reset_db_singleton(db_module)
 
 
 if __name__ == "__main__":

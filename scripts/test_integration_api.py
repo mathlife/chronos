@@ -6,18 +6,16 @@ import json
 import os
 import sqlite3
 import sys
-import uuid
 from pathlib import Path
 from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-TMP_ROOT = PROJECT_ROOT / ".tmp_tests"
-TMP_ROOT.mkdir(parents=True, exist_ok=True)
 
 from core import db as db_module
 from core import paths as paths_module
 from core.integration_api import create_task, delete_channel, list_channels, put_channel, remove_task, replace_channels, update_task
+from scripts.test_helpers import make_case_dir, reset_db_singleton
 
 
 SCHEMA_SQL = """
@@ -72,36 +70,18 @@ CREATE TABLE periodic_occurrences (
 """
 
 
-def reset_db_singleton() -> None:
-    if hasattr(db_module.DB, "reset_for_tests"):
-        db_module.DB.reset_for_tests()
-    else:
-        if db_module.DB._conn is not None:
-            db_module.DB._conn.close()
-        db_module.DB._conn = None
-        db_module.DB._instance = None
-    db_module.clear_task_cache()
-
-
 def prepare_temp_db(db_path: Path) -> None:
     conn = sqlite3.connect(str(db_path))
     conn.executescript(SCHEMA_SQL)
     conn.commit()
     conn.close()
 
-
-def make_case_dir(case_name: str) -> Path:
-    case_dir = TMP_ROOT / f"{case_name}-{uuid.uuid4().hex}"
-    case_dir.mkdir(parents=True, exist_ok=True)
-    return case_dir
-
-
 def test_task_flow() -> None:
     db_path = make_case_dir("integration-task") / "todo.db"
     prepare_temp_db(db_path)
     paths_module.TODO_DB = db_path
     db_module.TODO_DB = db_path
-    reset_db_singleton()
+    reset_db_singleton(db_module)
 
     created = create_task(
         {
@@ -125,7 +105,7 @@ def test_task_flow() -> None:
     assert row[0] == 0
 
     db_module.DB().close()
-    reset_db_singleton()
+    reset_db_singleton(db_module)
 
 
 def test_channel_flow() -> None:
@@ -178,7 +158,7 @@ def test_remove_task_failure_keeps_db_state() -> None:
     prepare_temp_db(db_path)
     paths_module.TODO_DB = db_path
     db_module.TODO_DB = db_path
-    reset_db_singleton()
+    reset_db_singleton(db_module)
 
     created = create_task(
         {
@@ -224,7 +204,7 @@ def test_remove_task_failure_keeps_db_state() -> None:
     assert op_row[1] >= 1
 
     db.close()
-    reset_db_singleton()
+    reset_db_singleton(db_module)
 
 
 if __name__ == "__main__":

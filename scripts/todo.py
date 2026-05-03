@@ -30,6 +30,7 @@ from core.config import get_config_path
 from core.notifiers import dispatch_message
 from core.paths import PYTHON_BIN, SCRIPTS_DIR, TODO_DB, WORKSPACE
 from core.models import ALLOWED_CYCLE_TYPES
+from core.system_command_runner import execute_system_handler
 from core.system_scheduler import remove_job
 from scripts.subagent_sync_ledger import looks_like_subagent_session
 
@@ -599,25 +600,15 @@ def run_system_command(handler_payload: str | None) -> tuple[bool, str]:
     if not handler_payload:
         return True, "system command task had no command payload"
     try:
-        payload = json.loads(handler_payload)
-    except json.JSONDecodeError:
-        payload = handler_payload
-
-    command = None
-    if isinstance(payload, dict):
-        command = payload.get('command') or payload.get('system_command')
-    elif isinstance(payload, str):
-        command = payload
-
-    if not command or not str(command).strip():
-        return True, "system command task had no command payload"
-
-    result = subprocess.run(str(command), shell=True, capture_output=True, text=True, timeout=600)
-    output = (result.stdout or result.stderr or '').strip()
-    message = f"command={command}; exit_code={result.returncode}"
-    if output:
-        message = f"{message}; output={output[:500]}"
-    return result.returncode == 0, message
+        execution = execute_system_handler(handler_payload, timeout_seconds=600)
+    except ValueError as exc:
+        return False, f"blocked={exc}"
+    except Exception as exc:  # pragma: no cover - external command failure path
+        return False, f"error={exc}"
+    message = f"command_id={execution['command_id']}; exit_code={execution['exit_code']}"
+    if execution.get("output"):
+        message = f"{message}; output={execution['output']}"
+    return bool(execution.get("ok")), message
 
 
 def run_special_handler(handler_name: str | None, handler_payload: str | None, task_text: str, now: datetime | None = None) -> tuple[bool, str]:

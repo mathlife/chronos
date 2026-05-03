@@ -7,7 +7,6 @@ import os
 import sqlite3
 import sys
 import threading
-import uuid
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -15,12 +14,11 @@ from http.server import ThreadingHTTPServer
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-TMP_ROOT = PROJECT_ROOT / ".tmp_tests"
-TMP_ROOT.mkdir(parents=True, exist_ok=True)
 
 from core import db as db_module
 from core import paths as paths_module
 from scripts.web_dashboard import DashboardHandler, build_snapshot, handle_mutation
+from scripts.test_helpers import make_case_dir, reset_db_singleton
 
 
 SCHEMA_SQL = """
@@ -87,28 +85,11 @@ CREATE TABLE periodic_occurrences (
 """
 
 
-def reset_db_singleton() -> None:
-    if hasattr(db_module.DB, "reset_for_tests"):
-        db_module.DB.reset_for_tests()
-    else:
-        if db_module.DB._conn is not None:
-            db_module.DB._conn.close()
-        db_module.DB._conn = None
-        db_module.DB._instance = None
-    db_module.clear_task_cache()
-
-
 def prepare_temp_db(db_path: Path) -> None:
     conn = sqlite3.connect(str(db_path))
     conn.executescript(SCHEMA_SQL)
     conn.commit()
     conn.close()
-
-
-def make_case_dir(case_name: str) -> Path:
-    case_dir = TMP_ROOT / f"{case_name}-{uuid.uuid4().hex}"
-    case_dir.mkdir(parents=True, exist_ok=True)
-    return case_dir
 
 
 def test_snapshot_excludes_linked_legacy_entries() -> None:
@@ -122,7 +103,7 @@ def test_snapshot_excludes_linked_legacy_entries() -> None:
     prepare_temp_db(db_path)
     paths_module.TODO_DB = db_path
     db_module.TODO_DB = db_path
-    reset_db_singleton()
+    reset_db_singleton(db_module)
 
     conn = sqlite3.connect(str(db_path))
     cur = conn.cursor()
@@ -149,7 +130,7 @@ def test_snapshot_excludes_linked_legacy_entries() -> None:
         os.environ.pop("CHRONOS_CONFIG_PATH", None)
     else:
         os.environ["CHRONOS_CONFIG_PATH"] = original_config
-    reset_db_singleton()
+    reset_db_singleton(db_module)
 
 
 def test_mutation_ops() -> None:
@@ -163,7 +144,7 @@ def test_mutation_ops() -> None:
     prepare_temp_db(db_path)
     paths_module.TODO_DB = db_path
     db_module.TODO_DB = db_path
-    reset_db_singleton()
+    reset_db_singleton(db_module)
 
     created = handle_mutation(
         "/api/v1/task/create",
@@ -195,7 +176,7 @@ def test_mutation_ops() -> None:
         os.environ.pop("CHRONOS_CONFIG_PATH", None)
     else:
         os.environ["CHRONOS_CONFIG_PATH"] = original_config
-    reset_db_singleton()
+    reset_db_singleton(db_module)
 
 
 def test_read_only_server_rejects_mutation() -> None:
@@ -209,7 +190,7 @@ def test_read_only_server_rejects_mutation() -> None:
     prepare_temp_db(db_path)
     paths_module.TODO_DB = db_path
     db_module.TODO_DB = db_path
-    reset_db_singleton()
+    reset_db_singleton(db_module)
 
     DashboardHandler.db_path = db_path
     DashboardHandler.basic_auth_token = None
@@ -227,7 +208,7 @@ def test_read_only_server_rejects_mutation() -> None:
 
     payload = json.dumps({"chat_id": "1"}).encode("utf-8")
     request = Request(
-        f"http://{host}:{port}/api/settings/update",
+        f"http://{host}:{port}/api/v1/settings/update",
         method="POST",
         data=payload,
         headers={"Content-Type": "application/json"},
@@ -248,7 +229,50 @@ def test_read_only_server_rejects_mutation() -> None:
         os.environ.pop("CHRONOS_CONFIG_PATH", None)
     else:
         os.environ["CHRONOS_CONFIG_PATH"] = original_config
-    reset_db_singleton()
+    reset_db_singleton(db_module)
+
+
+def test_health_endpoint() -> None:
+    case_dir = make_case_dir("web-health")
+    db_path = case_dir / "todo.db"
+    config_path = case_dir / "config.json"
+    config_path.write_text(json.dumps({"channels": []}, ensure_ascii=False), encoding="utf-8")
+    original_config = os.environ.get("CHRONOS_CONFIG_PATH")
+    os.environ["CHRONOS_CONFIG_PATH"] = str(config_path)
+
+    prepare_temp_db(db_path)
+    paths_module.TODO_DB = db_path
+    db_module.TODO_DB = db_path
+    reset_db_singleton(db_module)
+
+    DashboardHandler.db_path = db_path
+    DashboardHandler.basic_auth_token = None
+    DashboardHandler.debug_errors = False
+    DashboardHandler.read_only_mode = False
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), DashboardHandler)
+    host, port = server.server_address
+
+    def serve_one() -> None:
+        server.handle_request()
+
+    thread = threading.Thread(target=serve_one, daemon=True)
+    thread.start()
+
+    try:
+        response = urlopen(f"http://{host}:{port}/api/v1/health", timeout=5)
+        body = json.loads(response.read().decode("utf-8"))
+        assert body.get("status") in {"ok", "degraded"}
+        assert body.get("db_ok") is True
+        assert "metrics" in body
+    finally:
+        server.server_close()
+
+    if original_config is None:
+        os.environ.pop("CHRONOS_CONFIG_PATH", None)
+    else:
+        os.environ["CHRONOS_CONFIG_PATH"] = original_config
+    reset_db_singleton(db_module)
 
 
 if __name__ == "__main__":
@@ -258,3 +282,5 @@ if __name__ == "__main__":
     print("[ok] mutation ops for task/channel/settings")
     test_read_only_server_rejects_mutation()
     print("[ok] read-only server rejects mutation")
+    test_health_endpoint()
+    print("[ok] health endpoint returns db and metrics status")

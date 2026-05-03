@@ -11,7 +11,8 @@ from .config import get_raw_config, remove_channel, set_channels, upsert_channel
 from .db import DB, clear_task_cache, db_commit
 from .models import ALLOWED_CYCLE_TYPES
 from .paths import PYTHON_BIN, SCRIPTS_DIR
-from .system_scheduler import build_job_command, create_once_job, remove_job
+from .system_command_runner import build_handler_payload_from_legacy_command
+from .system_scheduler import build_job_command, create_once_job, remove_job, supports_system_scheduler
 from .timezones import get_shanghai_tz
 
 _TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
@@ -150,7 +151,7 @@ def _normalize_task_payload(payload: dict, *, partial: bool) -> dict:
         command = str(system_command).strip()
         if command:
             normalized["special_handler"] = "run_command"
-            normalized["handler_payload"] = json.dumps({"command": command}, ensure_ascii=False)
+            normalized["handler_payload"] = build_handler_payload_from_legacy_command(command)
         else:
             normalized["special_handler"] = None
             normalized["handler_payload"] = None
@@ -216,23 +217,31 @@ def _normalize_row_dict(row: Any) -> dict:
     return dict(row) if hasattr(row, "keys") else dict(row or {})
 
 
-def _remove_scheduled_jobs(rows: list[dict]) -> list[dict]:
+def _remove_scheduled_jobs(rows: list[dict]) -> tuple[list[dict], list[str]]:
     removed: list[dict] = []
+    warnings: list[str] = []
+    scheduler_available = supports_system_scheduler()
     for row in rows:
         row_payload = dict(row)
         reminder_job_id = row_payload.get("reminder_job_id")
         execution_job_id = row_payload.get("execution_job_id")
         if reminder_job_id:
-            ok = remove_job(str(reminder_job_id))
-            if not ok:
-                raise RuntimeError(f"failed to remove reminder job {reminder_job_id}")
-            removed.append({"kind": "reminder", "job_name": str(reminder_job_id), "row": row_payload})
+            if not scheduler_available:
+                warnings.append(f"skipped removing reminder job {reminder_job_id}: scheduler unavailable")
+            else:
+                ok = remove_job(str(reminder_job_id))
+                if not ok:
+                    raise RuntimeError(f"failed to remove reminder job {reminder_job_id}")
+                removed.append({"kind": "reminder", "job_name": str(reminder_job_id), "row": row_payload})
         if execution_job_id:
-            ok = remove_job(str(execution_job_id))
-            if not ok:
-                raise RuntimeError(f"failed to remove execution job {execution_job_id}")
-            removed.append({"kind": "execution", "job_name": str(execution_job_id), "row": row_payload})
-    return removed
+            if not scheduler_available:
+                warnings.append(f"skipped removing execution job {execution_job_id}: scheduler unavailable")
+            else:
+                ok = remove_job(str(execution_job_id))
+                if not ok:
+                    raise RuntimeError(f"failed to remove execution job {execution_job_id}")
+                removed.append({"kind": "execution", "job_name": str(execution_job_id), "row": row_payload})
+    return removed, warnings
 
 
 def _build_run_at(row: dict, *, kind: str) -> datetime | None:
@@ -428,8 +437,9 @@ def remove_task(task_id: int, *, hard: bool = False) -> bool:
         raise
 
     removed_jobs: list[dict] = []
+    removal_warnings: list[str] = []
     try:
-        removed_jobs = _remove_scheduled_jobs(row_payloads)
+        removed_jobs, removal_warnings = _remove_scheduled_jobs(row_payloads)
 
         _begin_immediate(db)
         try:
@@ -454,7 +464,9 @@ def remove_task(task_id: int, *, hard: bool = False) -> bool:
                 db.execute("DELETE FROM periodic_tasks WHERE id = ?", (task_id,))
             else:
                 db.execute("UPDATE periodic_tasks SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (task_id,))
-            _update_scheduler_operation(db, operation_id=operation_id, status="applied", error=None)
+            final_status = "applied_with_warning" if removal_warnings else "applied"
+            warning_text = "; ".join(removal_warnings) if removal_warnings else None
+            _update_scheduler_operation(db, operation_id=operation_id, status=final_status, error=warning_text)
             db_commit()
         except Exception as exc:
             db.execute("ROLLBACK")

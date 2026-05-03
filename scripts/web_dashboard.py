@@ -20,6 +20,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.config import get_raw_config, inspect_config, save_raw_config
 from core.integration_api import create_task, delete_channel, put_channel, remove_task, update_task
+from core.observability import METRICS, emit_log
 from core.paths import TODO_DB
 from core.system_scheduler import supports_system_scheduler
 from core.timezones import get_shanghai_tz
@@ -454,6 +455,31 @@ def build_snapshot(db_path: Path, *, read_only: bool = False) -> dict:
     return snapshot
 
 
+def build_health(db_path: Path, *, read_only: bool = False) -> dict:
+    now = datetime.now(SHANGHAI_TZ)
+    db_ok = False
+    db_error = None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("SELECT 1")
+        conn.close()
+        db_ok = True
+    except sqlite3.Error as exc:
+        db_error = str(exc)
+
+    status = "ok" if db_ok else "degraded"
+    return {
+        "status": status,
+        "generated_at": now.isoformat(timespec="seconds"),
+        "db_ok": db_ok,
+        "db_path": str(db_path),
+        "db_error": db_error,
+        "system_scheduler": supports_system_scheduler(),
+        "read_only": bool(read_only),
+        "metrics": METRICS.snapshot(),
+    }
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     db_path: Path = TODO_DB
     basic_auth_token: str | None = None
@@ -462,6 +488,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if not self._check_auth():
+            METRICS.inc("web_auth_rejected_total")
             self._write_auth_required()
             return
         parsed = urlparse(self.path)
@@ -470,7 +497,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         normalized_path = _normalize_api_path(parsed.path)
         if normalized_path == "/api/v1/snapshot":
+            METRICS.inc("web_snapshot_requests_total")
             payload = build_snapshot(self.db_path, read_only=self.read_only_mode)
+            self._write_json(payload)
+            return
+        if normalized_path == "/api/v1/health":
+            METRICS.inc("web_health_requests_total")
+            payload = build_health(self.db_path, read_only=self.read_only_mode)
             self._write_json(payload)
             return
         self.send_response(404)
@@ -479,6 +512,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         if not self._check_auth():
+            METRICS.inc("web_auth_rejected_total")
             self._write_auth_required()
             return
         parsed = urlparse(self.path)
@@ -487,13 +521,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 raise ValueError("server is running in read-only mode")
             payload = self._read_json_body()
             result = handle_mutation(parsed.path, payload)
+            METRICS.inc("web_mutation_success_total")
             self._write_json({"ok": True, "data": result})
         except ValueError as exc:
+            METRICS.inc("web_mutation_client_error_total")
+            emit_log("web.mutation.client_error", level="WARNING", path=parsed.path, error=str(exc))
             self._write_json({"ok": False, "error": str(exc)}, status=400)
         except Exception as exc:
+            METRICS.inc("web_mutation_server_error_total")
             if self.debug_errors:
                 self._write_json({"ok": False, "error": str(exc)}, status=500)
             else:
+                emit_log("web.mutation.server_error", level="ERROR", path=parsed.path, error=str(exc))
                 print(f"[web_dashboard] internal error on {parsed.path}: {exc}", file=sys.stderr)
                 traceback.print_exc()
                 self._write_json({"ok": False, "error": "operation failed"}, status=500)
@@ -685,6 +724,14 @@ def main() -> int:
     DashboardHandler.basic_auth_token = _encode_basic_auth_token(args.basic_auth) if args.basic_auth else None
     DashboardHandler.read_only_mode = bool(args.read_only)
     server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
+    emit_log(
+        "web.server.started",
+        host=args.host,
+        port=int(args.port),
+        read_only=bool(args.read_only),
+        auth_enabled=bool(args.basic_auth),
+        db_path=str(db_path),
+    )
     print(f"Chronos dashboard running at http://{args.host}:{args.port}")
     print(f"Using DB: {db_path}")
     if args.basic_auth:
