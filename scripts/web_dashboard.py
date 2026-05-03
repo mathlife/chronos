@@ -126,6 +126,8 @@ HTML_PAGE = """<!doctype html>
             <input id="removeTaskId" placeholder="e.g. 12" />
           </div>
         </div>
+        <label style="margin-top:8px; display:block;">Original task JSON (read-only)</label>
+        <textarea id="originalTaskJson" readonly>{}</textarea>
         <label style="margin-top:8px; display:block;">Editable patch JSON (auto-filled from selected task)</label>
         <textarea id="editTaskPatchJson">{}</textarea>
         <div class="btns">
@@ -215,6 +217,8 @@ HTML_PAGE = """<!doctype html>
     document.addEventListener('DOMContentLoaded', () => {
       const em = document.getElementById('editMode');
       em.addEventListener('change', applyEditLock);
+      const taskSelect = document.getElementById('editTaskSelect');
+      if (taskSelect) taskSelect.addEventListener('change', () => loadSelectedTaskPatch(false));
       applyEditLock();
     });
     async function callApi(path, payload) {
@@ -239,6 +243,7 @@ HTML_PAGE = """<!doctype html>
     function renderTaskOptions() {
       const select = document.getElementById('editTaskSelect');
       if (!select) return;
+      const previous = select.value;
       const items = tasksCache || [];
       select.innerHTML = '';
       if (!items.length) {
@@ -246,6 +251,8 @@ HTML_PAGE = """<!doctype html>
         opt.value = '';
         opt.textContent = 'No task available';
         select.appendChild(opt);
+        document.getElementById('originalTaskJson').value = '{}';
+        document.getElementById('editTaskPatchJson').value = '{}';
         return;
       }
       for (const task of items) {
@@ -257,8 +264,9 @@ HTML_PAGE = """<!doctype html>
         opt.textContent = `#${task.id} ${task.name || ''} (${cycle}${t ? ' ' + t : ''}, ${active})`;
         select.appendChild(opt);
       }
-      if (select.value) return;
-      select.value = String(items[0].id ?? '');
+      const matched = items.some(t => String(t.id ?? '') === previous);
+      select.value = matched ? previous : String(items[0].id ?? '');
+      loadSelectedTaskPatch(false);
     }
     function buildEditablePatch(task) {
       const patch = {};
@@ -268,14 +276,15 @@ HTML_PAGE = """<!doctype html>
       }
       return patch;
     }
-    function loadSelectedTaskPatch() {
+    function loadSelectedTaskPatch(showMessage = true) {
       const select = document.getElementById('editTaskSelect');
       const id = Number((select && select.value) || 0);
       const task = (tasksCache || []).find(t => Number(t.id) === id);
       if (!task) {
-        setResult(false, `task ${id} not found in current snapshot`);
+        if (showMessage) setResult(false, `task ${id} not found in current snapshot`);
         return;
       }
+      document.getElementById('originalTaskJson').value = JSON.stringify(task, null, 2);
       const patch = buildEditablePatch(task);
       document.getElementById('editTaskPatchJson').value = JSON.stringify(patch, null, 2);
       document.getElementById('updateTaskId').value = String(id);
@@ -291,7 +300,7 @@ HTML_PAGE = """<!doctype html>
         null,
         2
       );
-      setResult(true, `loaded task ${id} for editing`);
+      if (showMessage) setResult(true, `loaded task ${id} for editing`);
     }
     async function updateSelectedTask() {
       try {
