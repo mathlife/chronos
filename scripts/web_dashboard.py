@@ -118,13 +118,26 @@ HTML_PAGE = """<!doctype html>
         </div>
         <div class="row" style="margin-top:8px;">
           <div>
+            <label>Edit existing task</label>
+            <select id="editTaskSelect"></select>
+          </div>
+          <div>
+            <label>Quick remove selected task id</label>
+            <input id="removeTaskId" placeholder="e.g. 12" />
+          </div>
+        </div>
+        <label style="margin-top:8px; display:block;">Editable patch JSON (auto-filled from selected task)</label>
+        <textarea id="editTaskPatchJson">{}</textarea>
+        <div class="btns">
+          <button class="alt" onclick="loadSelectedTaskPatch()">Load selected task</button>
+          <button class="alt" onclick="updateSelectedTask()">Save selected task</button>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div>
             <label>Update task id</label>
             <input id="updateTaskId" placeholder="e.g. 12" />
           </div>
-          <div>
-            <label>Remove task id</label>
-            <input id="removeTaskId" placeholder="e.g. 12" />
-          </div>
+          <div></div>
         </div>
         <label style="margin-top:8px; display:block;">Update patch JSON</label>
         <textarea id="updateTaskJson">{"delivery_target":"tg-main,hook-main"}</textarea>
@@ -160,6 +173,13 @@ HTML_PAGE = """<!doctype html>
       setTimeout(() => { box.textContent = ''; }, 6000);
     }
     let serverReadOnly = false;
+    let tasksCache = [];
+    const taskPatchKeys = [
+      'name','category','cycle_type','weekday','day_of_month','range_start','range_end',
+      'n_per_month','interval_hours','time_of_day','end_date','start_date','reminder_template',
+      'task_kind','source','legacy_entry_id','special_handler','handler_payload',
+      'delivery_target','delivery_mode','dates_list','is_active'
+    ];
     function editingEnabled() {
       return document.getElementById('editMode').checked;
     }
@@ -171,7 +191,7 @@ HTML_PAGE = """<!doctype html>
       const enabled = editingEnabled() && !serverReadOnly;
       const targets = [
         'legacyChatId','removeChannelId','channelJson','createTaskJson',
-        'updateTaskId','removeTaskId','updateTaskJson'
+        'editTaskSelect','editTaskPatchJson','updateTaskId','removeTaskId','updateTaskJson'
       ];
       for (const id of targets) {
         const el = document.getElementById(id);
@@ -213,6 +233,75 @@ HTML_PAGE = """<!doctype html>
         const payload = JSON.parse(document.getElementById('createTaskJson').value);
         const r = await callApi(`${API_BASE}/task/create`, { payload });
         setResult(true, `created task ${r.data.id}`);
+        await load();
+      } catch (e) { setResult(false, e.message); }
+    }
+    function renderTaskOptions() {
+      const select = document.getElementById('editTaskSelect');
+      if (!select) return;
+      const items = tasksCache || [];
+      select.innerHTML = '';
+      if (!items.length) {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = 'No task available';
+        select.appendChild(opt);
+        return;
+      }
+      for (const task of items) {
+        const opt = document.createElement('option');
+        opt.value = String(task.id ?? '');
+        const cycle = task.cycle_type || 'once';
+        const t = task.time_of_day || '';
+        const active = String(task.is_active) === '1' ? 'active' : 'inactive';
+        opt.textContent = `#${task.id} ${task.name || ''} (${cycle}${t ? ' ' + t : ''}, ${active})`;
+        select.appendChild(opt);
+      }
+      if (select.value) return;
+      select.value = String(items[0].id ?? '');
+    }
+    function buildEditablePatch(task) {
+      const patch = {};
+      for (const key of taskPatchKeys) {
+        if (!(key in task)) continue;
+        patch[key] = task[key];
+      }
+      return patch;
+    }
+    function loadSelectedTaskPatch() {
+      const select = document.getElementById('editTaskSelect');
+      const id = Number((select && select.value) || 0);
+      const task = (tasksCache || []).find(t => Number(t.id) === id);
+      if (!task) {
+        setResult(false, `task ${id} not found in current snapshot`);
+        return;
+      }
+      const patch = buildEditablePatch(task);
+      document.getElementById('editTaskPatchJson').value = JSON.stringify(patch, null, 2);
+      document.getElementById('updateTaskId').value = String(id);
+      document.getElementById('removeTaskId').value = String(id);
+      document.getElementById('updateTaskJson').value = JSON.stringify(
+        {
+          name: patch.name,
+          cycle_type: patch.cycle_type,
+          time_of_day: patch.time_of_day,
+          delivery_target: patch.delivery_target,
+          is_active: patch.is_active
+        },
+        null,
+        2
+      );
+      setResult(true, `loaded task ${id} for editing`);
+    }
+    async function updateSelectedTask() {
+      try {
+        ensureWritableAction();
+        const select = document.getElementById('editTaskSelect');
+        const id = Number((select && select.value) || 0);
+        if (!id) throw new Error('select a task first');
+        const patch = JSON.parse(document.getElementById('editTaskPatchJson').value);
+        const r = await callApi(`${API_BASE}/task/update`, { id, patch });
+        setResult(true, `updated task ${r.data.id}`);
         await load();
       } catch (e) { setResult(false, e.message); }
     }
@@ -310,6 +399,8 @@ db_path: ${esc(s.db_path)}</pre>
         ])
       );
       const tasks = data.tasks || [];
+      tasksCache = tasks;
+      renderTaskOptions();
       document.getElementById('tasks').innerHTML = table(
         ['id','name','active','kind','cycle','time','delivery_target','source'],
         tasks.map(t => [
@@ -391,7 +482,11 @@ def build_snapshot(db_path: Path, *, read_only: bool = False) -> dict:
         tasks = _safe_query(
             conn,
             """
-            SELECT id, name, cycle_type, time_of_day, is_active, task_kind, source, delivery_target
+            SELECT
+              id, name, category, cycle_type, weekday, day_of_month, range_start, range_end,
+              n_per_month, interval_hours, time_of_day, end_date, start_date, reminder_template,
+              task_kind, source, legacy_entry_id, special_handler, handler_payload,
+              delivery_target, delivery_mode, dates_list, is_active
             FROM periodic_tasks
             ORDER BY is_active DESC, id DESC
             """,
