@@ -48,6 +48,19 @@ HTML_PAGE = """<!doctype html>
     table { width:100%; border-collapse: collapse; font-size:13px; }
     th, td { text-align:left; border-bottom:1px solid #eef2f8; padding:6px 4px; vertical-align: top; }
     th { color:#334155; font-weight:600; }
+    .channel-list { display:grid; gap:10px; }
+    .channel-item { border:1px solid #e6edf7; border-radius:10px; background:#fbfdff; padding:10px; }
+    .channel-head { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
+    .channel-title { font-size:14px; font-weight:600; color:#22314a; margin-bottom:4px; }
+    .channel-sub { font-size:12px; color:#64748b; display:flex; gap:8px; flex-wrap:wrap; }
+    .channel-tag { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; }
+    .channel-tag.on { background:#dcfce7; color:#166534; }
+    .channel-tag.off { background:#fef3c7; color:#92400e; }
+    .channel-config { margin-top:8px; border:1px solid #e8edf5; border-radius:8px; background:#f8fafc; padding:8px; }
+    .channel-row { display:grid; grid-template-columns: 140px 1fr; gap:8px; padding:3px 0; font-size:12px; }
+    .channel-key { color:#475569; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .channel-val { color:#0f172a; word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    @media (max-width: 700px) { .channel-row { grid-template-columns: 1fr; } }
     .pill { display:inline-block; padding:2px 8px; border-radius:999px; background:#ecfeff; color:var(--accent); font-size:12px; }
     .warn { color:var(--warn); }
     .ok { color:var(--ok); }
@@ -194,10 +207,8 @@ HTML_PAGE = """<!doctype html>
               <option value="daily">daily</option>
               <option value="hourly">hourly</option>
               <option value="weekly">weekly</option>
-              <option value="monthly_fixed">monthly_fixed</option>
-              <option value="monthly_range">monthly_range</option>
-              <option value="monthly_n_times">monthly_n_times</option>
-              <option value="monthly_dates">monthly_dates</option>
+              <option value="monthly_dates">monthly_dates (fixed days)</option>
+              <option value="monthly_range">monthly_range (window)</option>
             </select>
           </div>
           <div>
@@ -223,6 +234,26 @@ HTML_PAGE = """<!doctype html>
           <div>
             <label>Interval hours (1-24, hourly)</label>
             <input id="taskFormIntervalHours" type="number" min="1" max="24" />
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div>
+            <label>Monthly dates list (for monthly_dates)</label>
+            <input id="taskFormDatesList" placeholder="e.g. 1,10,25" />
+          </div>
+          <div>
+            <label>Quota in cycle (n_per_month, optional)</label>
+            <input id="taskFormNPerMonth" type="number" min="1" placeholder="e.g. 3" />
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div>
+            <label>Window start day (for monthly_range)</label>
+            <input id="taskFormRangeStart" type="number" min="1" max="31" />
+          </div>
+          <div>
+            <label>Window end day (for monthly_range)</label>
+            <input id="taskFormRangeEnd" type="number" min="1" max="31" />
           </div>
         </div>
         <div class="row" style="margin-top:8px;">
@@ -305,6 +336,49 @@ HTML_PAGE = """<!doctype html>
       const tr = rows.map(r => '<tr>' + r.map(c => `<td>${c}</td>`).join('') + '</tr>').join('');
       return `<table>${th}${tr}</table>`;
     }
+    function maskChannelConfigValue(key, value) {
+      const normalized = String(key || '').toLowerCase();
+      const raw = String(value ?? '');
+      const sensitive = normalized.includes('token') || normalized.includes('secret') || normalized.includes('password') || normalized.includes('key');
+      if (!sensitive) return raw;
+      if (raw.length <= 8) return '***';
+      return `${raw.slice(0, 4)}...${raw.slice(-4)}`;
+    }
+    function renderChannelConfig(config) {
+      const obj = config && typeof config === 'object' ? config : {};
+      const keys = Object.keys(obj);
+      if (!keys.length) return '<div class="muted">no config</div>';
+      return keys
+        .sort()
+        .map((key) => `<div class="channel-row"><div class="channel-key">${esc(key)}</div><div class="channel-val">${esc(maskChannelConfigValue(key, obj[key]))}</div></div>`)
+        .join('');
+    }
+    function renderChannels(channels) {
+      if (!channels.length) return '<div class="muted">empty</div>';
+      return `<div class="channel-list">` + channels.map((c) => {
+        const id = String(c.id || '');
+        const type = String(c.type || 'unknown');
+        const enabled = c.enabled === false ? false : true;
+        return `
+          <div class="channel-item">
+            <div class="channel-head">
+              <div>
+                <div class="channel-title">${esc(id)}</div>
+                <div class="channel-sub">
+                  <span>type: ${esc(type)}</span>
+                  <span class="channel-tag ${enabled ? 'on' : 'off'}">${enabled ? 'enabled' : 'disabled'}</span>
+                </div>
+              </div>
+              <div class="btns">
+                <button class="alt" onclick='selectChannelById(${JSON.stringify(id)})'>Edit</button>
+                <button class="warn" onclick='removeSelectedChannel(${JSON.stringify(id)})'>Remove</button>
+              </div>
+            </div>
+            <div class="channel-config">${renderChannelConfig(c.config)}</div>
+          </div>
+        `;
+      }).join('') + `</div>`;
+    }
     function setResult(ok, msg) {
       const box = document.getElementById('opResult');
       box.className = ok ? 'ok' : 'warn';
@@ -325,7 +399,8 @@ HTML_PAGE = """<!doctype html>
     const todayFormFieldIds = ['todayFormName', 'todayFormStatus', 'todayFormTime'];
     const taskFormFieldIds = [
       'taskFormName','taskFormTaskKind','taskFormCycleType','taskFormTime','taskFormStartDate',
-      'taskFormEndDate','taskFormDeliveryTarget','taskFormIsActive','taskFormWeekday','taskFormIntervalHours'
+      'taskFormEndDate','taskFormDeliveryTarget','taskFormIsActive','taskFormWeekday','taskFormIntervalHours',
+      'taskFormDatesList','taskFormNPerMonth','taskFormRangeStart','taskFormRangeEnd'
     ];
     const taskPatchKeys = [
       'name','category','cycle_type','weekday','day_of_month','range_start','range_end',
@@ -347,7 +422,8 @@ HTML_PAGE = """<!doctype html>
         'channelFormBotToken','channelFormChatId','channelFormUrl','channelFormSecret','todayTaskSelect',
         'todayFormName','todayFormStatus','todayFormTime','editTaskSelect',
         'taskFormName','taskFormTaskKind','taskFormCycleType','taskFormTime','taskFormStartDate',
-        'taskFormEndDate','taskFormDeliveryTarget','taskFormIsActive','taskFormWeekday','taskFormIntervalHours'
+        'taskFormEndDate','taskFormDeliveryTarget','taskFormIsActive','taskFormWeekday','taskFormIntervalHours',
+        'taskFormDatesList','taskFormNPerMonth','taskFormRangeStart','taskFormRangeEnd'
       ];
       for (const id of targets) {
         const el = document.getElementById(id);
@@ -368,6 +444,7 @@ HTML_PAGE = """<!doctype html>
         state.textContent = 'Server mode: writable; browser edit mode disabled';
       }
       syncChannelFormVisibility();
+      syncTaskCycleFormVisibility();
     }
     document.addEventListener('DOMContentLoaded', () => {
       const em = document.getElementById('editMode');
@@ -378,6 +455,11 @@ HTML_PAGE = """<!doctype html>
       if (todayTaskSelect) todayTaskSelect.addEventListener('change', () => loadSelectedTodayTask(false));
       const taskSelect = document.getElementById('editTaskSelect');
       if (taskSelect) taskSelect.addEventListener('change', () => loadSelectedTask(false));
+      const taskCycleType = document.getElementById('taskFormCycleType');
+      if (taskCycleType) taskCycleType.addEventListener('change', () => {
+        taskFormDirty = true;
+        syncTaskCycleFormVisibility();
+      });
       const channelType = document.getElementById('channelFormType');
       if (channelType) channelType.addEventListener('change', () => {
         channelFormDirty = true;
@@ -727,7 +809,11 @@ HTML_PAGE = """<!doctype html>
         delivery_target: '',
         is_active: 1,
         weekday: null,
-        interval_hours: null
+        interval_hours: null,
+        dates_list: '',
+        n_per_month: null,
+        range_start: null,
+        range_end: null
       });
       taskFormDirty = false;
       if (showMessage) setResult(true, 'switched to create mode');
@@ -757,9 +843,21 @@ HTML_PAGE = """<!doctype html>
       el.value = value == null ? '' : String(value);
     }
     function fillTaskForm(task) {
+      let uiCycle = task.cycle_type || 'once';
+      let uiDatesList = task.dates_list || '';
+      let uiRangeStart = task.range_start;
+      let uiRangeEnd = task.range_end;
+      if (uiCycle === 'monthly_fixed') {
+        uiCycle = 'monthly_dates';
+        if (!uiDatesList && task.day_of_month != null) uiDatesList = String(task.day_of_month);
+      } else if (uiCycle === 'monthly_n_times') {
+        uiCycle = 'monthly_range';
+        if (uiRangeStart == null) uiRangeStart = 1;
+        if (uiRangeEnd == null) uiRangeEnd = 31;
+      }
       setFormValue('taskFormName', task.name || '');
       setFormValue('taskFormTaskKind', task.task_kind || 'scheduled');
-      setFormValue('taskFormCycleType', task.cycle_type || 'once');
+      setFormValue('taskFormCycleType', uiCycle);
       setFormValue('taskFormTime', task.time_of_day || '');
       setFormValue('taskFormStartDate', task.start_date || '');
       setFormValue('taskFormEndDate', task.end_date || '');
@@ -767,6 +865,11 @@ HTML_PAGE = """<!doctype html>
       setFormValue('taskFormIsActive', String(task.is_active) === '0' ? '0' : '1');
       setFormValue('taskFormWeekday', task.weekday);
       setFormValue('taskFormIntervalHours', task.interval_hours);
+      setFormValue('taskFormDatesList', uiDatesList);
+      setFormValue('taskFormNPerMonth', task.n_per_month);
+      setFormValue('taskFormRangeStart', uiRangeStart);
+      setFormValue('taskFormRangeEnd', uiRangeEnd);
+      syncTaskCycleFormVisibility();
     }
     function parseOptionalInt(id, min, max, fieldName) {
       const raw = String(document.getElementById(id).value || '').trim();
@@ -775,6 +878,20 @@ HTML_PAGE = """<!doctype html>
       if (!Number.isInteger(num)) throw new Error(`${fieldName} must be integer`);
       if (num < min || num > max) throw new Error(`${fieldName} must be ${min}-${max}`);
       return num;
+    }
+    function syncTaskCycleFormVisibility() {
+      const cycle = String(document.getElementById('taskFormCycleType').value || '');
+      const writable = editingEnabled() && !serverReadOnly;
+      const dateIds = ['taskFormDatesList'];
+      const rangeIds = ['taskFormRangeStart', 'taskFormRangeEnd', 'taskFormNPerMonth'];
+      for (const id of dateIds) {
+        const el = document.getElementById(id);
+        if (el) el.disabled = !writable || cycle !== 'monthly_dates';
+      }
+      for (const id of rangeIds) {
+        const el = document.getElementById(id);
+        if (el) el.disabled = !writable || cycle !== 'monthly_range';
+      }
     }
     function buildPatchFromForm() {
       const name = String(document.getElementById('taskFormName').value || '').trim();
@@ -788,6 +905,10 @@ HTML_PAGE = """<!doctype html>
       const is_active = String(document.getElementById('taskFormIsActive').value || '1') === '1';
       const weekday = parseOptionalInt('taskFormWeekday', 0, 6, 'weekday');
       const interval_hours = parseOptionalInt('taskFormIntervalHours', 1, 24, 'interval_hours');
+      const n_per_month = parseOptionalInt('taskFormNPerMonth', 1, 365, 'n_per_month');
+      const range_start = parseOptionalInt('taskFormRangeStart', 1, 31, 'range_start');
+      const range_end = parseOptionalInt('taskFormRangeEnd', 1, 31, 'range_end');
+      const dates_list = String(document.getElementById('taskFormDatesList').value || '').trim();
       const patch = {
         name,
         cycle_type,
@@ -797,8 +918,16 @@ HTML_PAGE = """<!doctype html>
         end_date: end_date || null,
         delivery_target: delivery_target || null,
         weekday,
-        interval_hours
+        interval_hours,
+        n_per_month,
+        range_start,
+        range_end,
+        dates_list: dates_list || null
       };
+      if (cycle_type === 'monthly_dates' && !patch.dates_list) throw new Error('monthly_dates requires dates_list');
+      if (cycle_type === 'monthly_range' && (patch.range_start == null || patch.range_end == null)) {
+        throw new Error('monthly_range requires range_start and range_end');
+      }
       if (time_of_day) patch.time_of_day = time_of_day;
       return patch;
     }
@@ -861,16 +990,7 @@ db_path: ${esc(s.db_path)}</pre>
       const channels = data.channels || [];
       channelsCache = channels;
       renderChannelOptions(backgroundRefresh);
-      document.getElementById('channels').innerHTML = table(
-        ['id','type','enabled','config','actions'],
-        channels.map(c => [
-          esc(c.id),
-          esc(c.type),
-          esc(c.enabled),
-          `<pre>${esc(JSON.stringify(c.config || {}, null, 2))}</pre>`,
-          `<div class="btns"><button class="alt" onclick='selectChannelById(${JSON.stringify(String(c.id || ""))})'>Edit</button><button class="warn" onclick='removeSelectedChannel(${JSON.stringify(String(c.id || ""))})'>Remove</button></div>`
-        ])
-      );
+      document.getElementById('channels').innerHTML = renderChannels(channels);
       const today = data.today_tasks || [];
       todayTasksCache = today;
       renderTodayOptions(backgroundRefresh);
