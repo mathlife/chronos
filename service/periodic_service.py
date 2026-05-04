@@ -726,8 +726,10 @@ class PeriodicTaskManager:
                 status = row['status']
                 if status == 'reminded':
                     status = '已提醒'
-                schedule_suffix = f" @ {row['scheduled_time']}" if row['scheduled_time'] else ''
-                lines.append(f"- FIN-{row['id']} | {row['name']} ({row['cycle_type']}){schedule_suffix} | {status}")
+                elif status == 'pending':
+                    status = '待处理'
+                schedule_suffix = f" | 开始时间 {row['scheduled_time']}" if row['scheduled_time'] else ''
+                lines.append(f"- FIN-{row['id']} | {row['name']}{schedule_suffix} | {status}")
         else:
             lines.append("")
             lines.append("【今日周期任务】")
@@ -740,6 +742,8 @@ class PeriodicTaskManager:
                 status = row['status']
                 if status == 'in_progress':
                     status = '进行中'
+                elif status == 'pending':
+                    status = '待处理'
                 lines.append(f"- ID{row['id']} | {row['group_name']} | {row['text']} | {status}")
         else:
             lines.append("")
@@ -751,8 +755,8 @@ class PeriodicTaskManager:
             lines.append("")
             lines.append(f"【已跳过】共 {skipped_total} 项（默认不混入活跃待办）")
             for row in skipped_periodic_rows:
-                schedule_suffix = f" @ {row['scheduled_time']}" if row['scheduled_time'] else ''
-                lines.append(f"- FIN-{row['id']} | {row['name']} ({row['cycle_type']}){schedule_suffix} | 已跳过")
+                schedule_suffix = f" | 开始时间 {row['scheduled_time']}" if row['scheduled_time'] else ''
+                lines.append(f"- FIN-{row['id']} | {row['name']}{schedule_suffix} | 已跳过")
             for row in skipped_simple_rows:
                 lines.append(f"- ID{row['id']} | {row['group_name']} | {row['text']} | 已跳过")
 
@@ -760,7 +764,7 @@ class PeriodicTaskManager:
 
     def _send_today_todo_snapshot(self, today: date) -> bool:
         message_text = self._build_today_todo_snapshot(today)
-        return self._send_message_now(message_text, task={"id": None, "name": "todo_snapshot", "task_kind": "system", "delivery_target": None})
+        return self._send_message_now(message_text, task={"id": None, "name": "todo_snapshot", "task_kind": "system", "delivery_target": "tg-summary"})
 
     def run_daily(self) -> int:
         with LearningContext("periodic_manager_daily_run", "Generate today's reminders, clean old cron jobs, and push today's todo snapshot", confidence="H"):
