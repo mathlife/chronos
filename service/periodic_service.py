@@ -1,6 +1,7 @@
 """Periodic task domain service for scheduling and execution."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -392,13 +393,43 @@ class PeriodicTaskManager:
             METRICS.inc("system_command_attempt_total")
             try:
                 execution = execute_system_handler(row["handler_payload"], timeout_seconds=600)
-                result_message = f"command_id={execution['command_id']}; exit_code={execution['exit_code']}"
-                if execution.get("output"):
-                    result_message = f"{result_message}; output={execution['output']}"
+                output_text = str(execution.get("output") or "").strip()
+                parsed_output = None
+                if output_text:
+                    try:
+                        parsed_output = json.loads(output_text)
+                    except Exception:
+                        parsed_output = None
+
                 if execution.get("ok"):
                     METRICS.inc("system_command_success_total")
+                    if isinstance(parsed_output, dict):
+                        imported_count = parsed_output.get("imported_count")
+                        failed_count = parsed_output.get("failed_count")
+                        pending = parsed_output.get("pending")
+                        scanned = parsed_output.get("scanned")
+                        result_message = (
+                            f"执行成功\n"
+                            f"- 命令ID：{execution.get('command_id')}\n"
+                            f"- 扫描：{scanned}\n"
+                            f"- 待处理：{pending}\n"
+                            f"- 导入成功：{imported_count}\n"
+                            f"- 导入失败：{failed_count}"
+                        )
+                    else:
+                        result_message = (
+                            f"执行成功\n"
+                            f"- 命令ID：{execution.get('command_id')}\n"
+                            f"- 退出码：{execution.get('exit_code')}"
+                        )
                 else:
                     METRICS.inc("system_command_failure_total")
+                    result_message = (
+                        f"执行失败\n"
+                        f"- 命令ID：{execution.get('command_id')}\n"
+                        f"- 退出码：{execution.get('exit_code')}\n"
+                        f"- 错误输出：{output_text or '无'}"
+                    )
                 emit_log(
                     "system_command.executed",
                     occurrence_id=occurrence_id,
@@ -418,12 +449,21 @@ class PeriodicTaskManager:
         else:
             result_message = f"system occurrence reached due time for task {row['name']}"
 
+        task_dict = {
+            "id": row["task_id"],
+            "name": row["name"],
+            "task_kind": row["task_kind"],
+            "delivery_target": row["delivery_target"],
+        }
+
         if blocked_by_policy:
             self._skip_occurrence_internal(
                 occurrence_id,
                 completion_mode="blocked_policy",
                 special_handler_result=result_message,
             )
+            message_text = f"⚠️ 系统任务阻止执行\n任务：{row['name']}\n结果：{result_message or 'blocked'}"
+            self._send_message_now(message_text, task=task_dict, occurrence_id=occurrence_id)
             return True
 
         self._complete_occurrence_internal(
@@ -436,6 +476,9 @@ class PeriodicTaskManager:
             (occurrence_id,),
         )
         db_commit()
+
+        message_text = f"✅ 系统任务已执行\n任务：{row['name']}\n结果：{result_message or 'ok'}"
+        self._send_message_now(message_text, task=task_dict, occurrence_id=occurrence_id)
         return True
 
     def schedule_reminder_job(self, occurrence_id: int, occ_date: date, time_of_day: str) -> Optional[str]:
