@@ -410,6 +410,9 @@ def update_task(task_id: int, patch: dict) -> dict:
     merged.update(normalized_patch)
     _validate_cycle_requirements(merged)
 
+    if "time_of_day" in normalized_patch and "event_time" not in normalized_patch:
+        normalized_patch["event_time"] = normalized_patch.get("time_of_day")
+
     assignments: list[str] = []
     params: list[Any] = []
     for key, value in normalized_patch.items():
