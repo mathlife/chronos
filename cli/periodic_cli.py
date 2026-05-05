@@ -190,6 +190,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 params["delivery_mode"] = args.delivery_mode
 
             activity_id = manager.add_activity(**params)
+            manager.ensure_today_occurrences()
             print(f"✅ Added task {activity_id}: {params.get('name')}")
             return 0
 

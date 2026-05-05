@@ -324,6 +324,22 @@ def get_task(task_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+def _sync_today_occurrences_after_create() -> None:
+    try:
+        from service.periodic_service import PeriodicTaskManager
+    except Exception:
+        return
+
+    manager = PeriodicTaskManager()
+    try:
+        manager.ensure_today_occurrences()
+    except Exception:
+        # Keep task creation successful even if same-day occurrence sync fails.
+        return
+    finally:
+        manager.db.close()
+
+
 def create_task(payload: dict) -> dict:
     normalized = _normalize_task_payload(payload, partial=False)
     name = str(normalized.get("name") or "").strip()
@@ -378,6 +394,7 @@ def create_task(payload: dict) -> dict:
     created = get_task(cur.lastrowid)
     if not created:
         raise RuntimeError("failed to load created task")
+    _sync_today_occurrences_after_create()
     return created
 
 
