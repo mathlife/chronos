@@ -139,7 +139,8 @@ def test_run_system_occurrence_marks_completed() -> None:
     ).fetchone()
     assert row[0] == "completed"
     assert row[1] == "system_scheduler"
-    assert "exit_code=0" in (row[2] or "")
+    assert "命令ID：echo" in (row[2] or "")
+    assert "退出码：0" in (row[2] or "")
     assert row[3] is None
     assert row[4] is None
     manager.db.close()

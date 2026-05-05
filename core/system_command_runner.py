@@ -12,6 +12,8 @@ from .paths import PYTHON_BIN, SCRIPTS_DIR
 
 DEFAULT_SYSTEM_COMMAND_TEMPLATES: dict[str, list[str]] = {
     "echo": ["echo", "{arg0}"],
+    "python3": ["python3", "{*args}"],
+    "bash": ["bash", "{*args}"],
     "todo_complete_overdue": [PYTHON_BIN, str(SCRIPTS_DIR / "todo.py"), "complete-overdue"],
     "periodic_ensure_today": [PYTHON_BIN, str(SCRIPTS_DIR / "periodic_task_manager.py"), "--ensure-today"],
 }
@@ -76,6 +78,9 @@ def _render_argv(command_id: str, args: list[str]) -> list[str]:
     values["args"] = " ".join(args)
     rendered: list[str] = []
     for token in template:
+        if token == "{*args}":
+            rendered.extend(args)
+            continue
         try:
             rendered.append(token.format_map(values))
         except KeyError as exc:
