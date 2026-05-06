@@ -720,7 +720,7 @@ class PeriodicTaskManager:
     def _build_today_todo_snapshot(self, today: date) -> str:
         active_periodic_rows = self.db.execute(
             """
-            SELECT o.id, o.date, o.status, t.name, t.cycle_type, o.scheduled_time
+            SELECT o.id, o.date, o.status, t.name, t.cycle_type, o.scheduled_time, COALESCE(t.task_kind, 'scheduled') AS task_kind
             FROM periodic_occurrences o
             JOIN periodic_tasks t ON o.task_id = t.id
             WHERE o.date = ? AND o.status IN ('pending', 'reminded')
@@ -766,11 +766,14 @@ class PeriodicTaskManager:
             """
         ).fetchall()
 
+        active_scheduled_periodic_rows = [row for row in active_periodic_rows if row["task_kind"] != "system"]
+        active_system_periodic_rows = [row for row in active_periodic_rows if row["task_kind"] == "system"]
+
         lines = [f"📋 今日待办总览（{today.isoformat()}）"]
-        if active_periodic_rows:
+        if active_scheduled_periodic_rows:
             lines.append("")
             lines.append("【今日周期任务】")
-            for row in active_periodic_rows:
+            for row in active_scheduled_periodic_rows:
                 status = row['status']
                 if status == 'reminded':
                     status = '已提醒'
@@ -783,7 +786,7 @@ class PeriodicTaskManager:
             lines.append("【今日周期任务】")
             lines.append("- 无")
 
-        if active_simple_rows:
+        if active_simple_rows or active_system_periodic_rows:
             lines.append("")
             lines.append("【其他待办】")
             for row in active_simple_rows:
@@ -793,6 +796,14 @@ class PeriodicTaskManager:
                 elif status == 'pending':
                     status = '待处理'
                 lines.append(f"- ID{row['id']} | {row['group_name']} | {row['text']} | {status}")
+            for row in active_system_periodic_rows:
+                status = row['status']
+                if status == 'reminded':
+                    status = '已提醒'
+                elif status == 'pending':
+                    status = '待处理'
+                schedule_suffix = f" | 开始时间 {row['scheduled_time']}" if row['scheduled_time'] else ''
+                lines.append(f"- FIN-{row['id']} | 系统任务 | {row['name']}{schedule_suffix} | {status}")
         else:
             lines.append("")
             lines.append("【其他待办】")

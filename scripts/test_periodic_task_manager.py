@@ -16,6 +16,18 @@ from scripts.test_helpers import make_case_dir, reset_db_singleton
 
 
 SCHEMA_SQL = """
+CREATE TABLE groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL
+);
+
+CREATE TABLE entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    text TEXT NOT NULL,
+    status TEXT NOT NULL,
+    group_id INTEGER
+);
+
 CREATE TABLE periodic_tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
@@ -82,6 +94,24 @@ def test_fire_reminder_occurrence() -> None:
     reset_db_singleton(db_module)
 
     manager = ptm_module.PeriodicTaskManager()
+    manager.db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT
+        )
+        """
+    )
+    manager.db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            text TEXT,
+            status TEXT,
+            group_id INTEGER
+        )
+        """
+    )
     manager.db.execute(
         """
         INSERT INTO periodic_tasks
@@ -207,6 +237,39 @@ def test_system_schedule_creates_execute_job_only() -> None:
     reset_db_singleton(db_module)
 
 
+def test_today_snapshot_puts_system_task_under_other_todo() -> None:
+    db_path = make_case_dir("snapshot-system-under-other") / "todo.db"
+    prepare_temp_db(db_path)
+    paths_module.TODO_DB = db_path
+    db_module.TODO_DB = db_path
+    reset_db_singleton(db_module)
+
+    manager = ptm_module.PeriodicTaskManager()
+    manager.db.execute(
+        """
+        INSERT INTO periodic_tasks
+        (id, name, category, cycle_type, time_of_day, timezone, is_active, count_current_month, task_kind, source, created_at, updated_at)
+        VALUES (1, 'System Sync', '系统任务', 'daily', '12:30', 'Asia/Shanghai', 1, 0, 'system', 'chronos', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """
+    )
+    manager.db.execute(
+        """
+        INSERT INTO periodic_occurrences
+        (id, task_id, date, status, scheduled_time, scheduled_at)
+        VALUES (1, 1, '2026-05-06', 'pending', '12:30', '2026-05-06T12:30:00')
+        """
+    )
+    db_module.db_commit()
+
+    snapshot = manager._build_today_todo_snapshot(date(2026, 5, 6))
+    assert "【今日周期任务】\n- 无" in snapshot
+    assert "【其他待办】" in snapshot
+    assert "FIN-1 | 系统任务 | System Sync | 开始时间 12:30 | 待处理" in snapshot
+
+    manager.db.close()
+    reset_db_singleton(db_module)
+
+
 if __name__ == "__main__":
     test_fire_reminder_occurrence()
     print("[ok] fire_reminder_occurrence marks pending occurrence as reminded")
@@ -216,3 +279,5 @@ if __name__ == "__main__":
     print("[ok] run_system_occurrence blocks legacy shell payload")
     test_system_schedule_creates_execute_job_only()
     print("[ok] system scheduling creates execute job only (no pre-reminder)")
+    test_today_snapshot_puts_system_task_under_other_todo()
+    print("[ok] today snapshot renders system tasks under other todo")
