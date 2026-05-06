@@ -2,6 +2,7 @@
 """Focused regression checks for Chronos periodic task manager."""
 import sqlite3
 import sys
+from datetime import date
 from pathlib import Path
 from unittest import mock
 
@@ -182,6 +183,30 @@ def test_run_system_occurrence_blocks_legacy_shell_payload() -> None:
     reset_db_singleton(db_module)
 
 
+def test_system_schedule_creates_execute_job_only() -> None:
+    db_path = make_case_dir("run-system-schedule-only-execute") / "todo.db"
+    prepare_temp_db(db_path)
+    paths_module.TODO_DB = db_path
+    db_module.TODO_DB = db_path
+    reset_db_singleton(db_module)
+
+    manager = ptm_module.PeriodicTaskManager()
+    with mock.patch("service.periodic_service.supports_system_scheduler", return_value=True), mock.patch(
+        "service.periodic_service.create_once_job"
+    ) as mocked_create_once_job:
+        reminder_job_name, execution_job_name = manager._schedule_system_occurrence_jobs(123, date(2026, 5, 6), "12:30")
+
+    assert reminder_job_name is None
+    assert execution_job_name == "chronos_execute_123"
+    assert mocked_create_once_job.call_count == 1
+    kwargs = mocked_create_once_job.call_args.kwargs
+    assert kwargs["job_name"] == "chronos_execute_123"
+    assert "--run-system-task" in kwargs["command"]
+    assert "--fire-reminder" not in kwargs["command"]
+    manager.db.close()
+    reset_db_singleton(db_module)
+
+
 if __name__ == "__main__":
     test_fire_reminder_occurrence()
     print("[ok] fire_reminder_occurrence marks pending occurrence as reminded")
@@ -189,3 +214,5 @@ if __name__ == "__main__":
     print("[ok] run_system_occurrence marks system command occurrence completed")
     test_run_system_occurrence_blocks_legacy_shell_payload()
     print("[ok] run_system_occurrence blocks legacy shell payload")
+    test_system_schedule_creates_execute_job_only()
+    print("[ok] system scheduling creates execute job only (no pre-reminder)")

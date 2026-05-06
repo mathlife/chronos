@@ -350,16 +350,10 @@ class PeriodicTaskManager:
             raise RuntimeError("system scheduler is not supported on this platform")
         hour, minute = map(int, time_of_day.split(':'))
         execute_at = datetime(occ_date.year, occ_date.month, occ_date.day, hour, minute, tzinfo=SHANGHAI_TZ)
-        reminder_at = execute_at - timedelta(minutes=5)
-        reminder_job_name = build_job_name("reminder", occurrence_id)
+        # System tasks should run at due time only; no pre-reminder cron.
+        reminder_job_name = None
         execute_job_name = build_job_name("execute", occurrence_id)
         script_path = SCRIPTS_DIR / "periodic_task_manager.py"
-
-        if reminder_at > datetime.now(SHANGHAI_TZ):
-            reminder_command = build_job_command(PYTHON_BIN, script_path, "--fire-reminder", occurrence_id)
-            create_once_job(job_name=reminder_job_name, command=reminder_command, run_at=reminder_at)
-        else:
-            reminder_job_name = None
 
         execute_command = build_job_command(PYTHON_BIN, script_path, "--run-system-task", occurrence_id)
         create_once_job(job_name=execute_job_name, command=execute_command, run_at=execute_at)
