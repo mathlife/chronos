@@ -270,6 +270,64 @@ def test_today_snapshot_puts_system_task_under_other_todo() -> None:
     reset_db_singleton(db_module)
 
 
+def test_today_snapshot_uses_6am_to_next_6am_window() -> None:
+    db_path = make_case_dir("snapshot-window-6am") / "todo.db"
+    prepare_temp_db(db_path)
+    paths_module.TODO_DB = db_path
+    db_module.TODO_DB = db_path
+    reset_db_singleton(db_module)
+
+    manager = ptm_module.PeriodicTaskManager()
+    manager.db.execute(
+        """
+        INSERT INTO periodic_tasks
+        (id, name, category, cycle_type, time_of_day, timezone, is_active, count_current_month, task_kind, source, created_at, updated_at)
+        VALUES (1, 'Today 07:00', 'Inbox', 'daily', '07:00', 'Asia/Shanghai', 1, 0, 'scheduled', 'chronos', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """
+    )
+    manager.db.execute(
+        """
+        INSERT INTO periodic_tasks
+        (id, name, category, cycle_type, time_of_day, timezone, is_active, count_current_month, task_kind, source, created_at, updated_at)
+        VALUES (2, 'Next day 01:30', 'Inbox', 'daily', '01:30', 'Asia/Shanghai', 1, 0, 'scheduled', 'chronos', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """
+    )
+    manager.db.execute(
+        """
+        INSERT INTO periodic_tasks
+        (id, name, category, cycle_type, time_of_day, timezone, is_active, count_current_month, task_kind, source, created_at, updated_at)
+        VALUES (3, 'Next day 06:30', 'Inbox', 'daily', '06:30', 'Asia/Shanghai', 1, 0, 'scheduled', 'chronos', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """
+    )
+    manager.db.execute(
+        """
+        INSERT INTO periodic_occurrences (id, task_id, date, status, scheduled_time, scheduled_at)
+        VALUES (11, 1, '2026-05-06', 'pending', '07:00', '2026-05-06T07:00:00')
+        """
+    )
+    manager.db.execute(
+        """
+        INSERT INTO periodic_occurrences (id, task_id, date, status, scheduled_time, scheduled_at)
+        VALUES (12, 2, '2026-05-07', 'pending', '01:30', '2026-05-07T01:30:00')
+        """
+    )
+    manager.db.execute(
+        """
+        INSERT INTO periodic_occurrences (id, task_id, date, status, scheduled_time, scheduled_at)
+        VALUES (13, 3, '2026-05-07', 'pending', '06:30', '2026-05-07T06:30:00')
+        """
+    )
+    db_module.db_commit()
+
+    snapshot = manager._build_today_todo_snapshot(date(2026, 5, 6))
+    assert "Today 07:00" in snapshot
+    assert "Next day 01:30" in snapshot
+    assert "Next day 06:30" not in snapshot
+
+    manager.db.close()
+    reset_db_singleton(db_module)
+
+
 if __name__ == "__main__":
     test_fire_reminder_occurrence()
     print("[ok] fire_reminder_occurrence marks pending occurrence as reminded")
@@ -281,3 +339,5 @@ if __name__ == "__main__":
     print("[ok] system scheduling creates execute job only (no pre-reminder)")
     test_today_snapshot_puts_system_task_under_other_todo()
     print("[ok] today snapshot renders system tasks under other todo")
+    test_today_snapshot_uses_6am_to_next_6am_window()
+    print("[ok] today snapshot covers 06:00 -> next day 06:00 window")

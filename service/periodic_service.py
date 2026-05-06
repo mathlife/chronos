@@ -718,25 +718,34 @@ class PeriodicTaskManager:
         return count
 
     def _build_today_todo_snapshot(self, today: date) -> str:
+        window_start = datetime(today.year, today.month, today.day, 6, 0, 0)
+        window_end = window_start + timedelta(days=1)
+        window_start_sql = window_start.strftime("%Y-%m-%d %H:%M:%S")
+        window_end_sql = window_end.strftime("%Y-%m-%d %H:%M:%S")
+
         active_periodic_rows = self.db.execute(
             """
             SELECT o.id, o.date, o.status, t.name, t.cycle_type, o.scheduled_time, COALESCE(t.task_kind, 'scheduled') AS task_kind
             FROM periodic_occurrences o
             JOIN periodic_tasks t ON o.task_id = t.id
-            WHERE o.date = ? AND o.status IN ('pending', 'reminded')
+            WHERE datetime(o.date || ' ' || COALESCE(o.scheduled_time, t.time_of_day, '00:00:00')) >= ?
+              AND datetime(o.date || ' ' || COALESCE(o.scheduled_time, t.time_of_day, '00:00:00')) < ?
+              AND o.status IN ('pending', 'reminded')
             ORDER BY COALESCE(o.scheduled_time, t.time_of_day), t.name, o.id
             """,
-            (today.isoformat(),),
+            (window_start_sql, window_end_sql),
         ).fetchall()
         skipped_periodic_rows = self.db.execute(
             """
             SELECT o.id, o.date, o.status, t.name, t.cycle_type, o.scheduled_time
             FROM periodic_occurrences o
             JOIN periodic_tasks t ON o.task_id = t.id
-            WHERE o.date = ? AND o.status = 'skipped'
+            WHERE datetime(o.date || ' ' || COALESCE(o.scheduled_time, t.time_of_day, '00:00:00')) >= ?
+              AND datetime(o.date || ' ' || COALESCE(o.scheduled_time, t.time_of_day, '00:00:00')) < ?
+              AND o.status = 'skipped'
             ORDER BY COALESCE(o.scheduled_time, t.time_of_day), t.name, o.id
             """,
-            (today.isoformat(),),
+            (window_start_sql, window_end_sql),
         ).fetchall()
 
         active_simple_rows = self.db.execute(
@@ -769,7 +778,7 @@ class PeriodicTaskManager:
         active_scheduled_periodic_rows = [row for row in active_periodic_rows if row["task_kind"] != "system"]
         active_system_periodic_rows = [row for row in active_periodic_rows if row["task_kind"] == "system"]
 
-        lines = [f"📋 今日待办总览（{today.isoformat()}）"]
+        lines = [f"📋 待办总览（{window_start.strftime('%m-%d %H:%M')} ~ {window_end.strftime('%m-%d %H:%M')}）"]
         if active_scheduled_periodic_rows:
             lines.append("")
             lines.append("【今日周期任务】")
