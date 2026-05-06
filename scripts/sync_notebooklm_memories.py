@@ -12,10 +12,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+# Ensure restricted environments (e.g. cron) can find ~/.local/bin tools.
+_local_bin = os.path.expanduser("~/.local/bin")
+if _local_bin not in os.environ.get("PATH", ""):
+    os.environ["PATH"] = _local_bin + ":" + os.environ.get("PATH", "")
 
 DEFAULT_NOTEBOOK_ID = "ea0592c6-20ed-4200-82df-a89f16b272ab"  # OpenClaw Daily Logs
 DEFAULT_SESSIONS_DIR = Path("/home/ubuntu/.hermes/sessions")
