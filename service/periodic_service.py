@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 from core.config import get_config
@@ -402,14 +403,24 @@ class PeriodicTaskManager:
                         failed_count = parsed_output.get("failed_count")
                         pending = parsed_output.get("pending")
                         scanned = parsed_output.get("scanned")
-                        result_message = (
-                            f"执行成功\n"
-                            f"- 命令ID：{execution.get('command_id')}\n"
-                            f"- 扫描：{scanned}\n"
-                            f"- 待处理：{pending}\n"
-                            f"- 导入成功：{imported_count}\n"
-                            f"- 导入失败：{failed_count}"
-                        )
+                        imported_files = parsed_output.get("imported_files") or []
+                        failed_files = parsed_output.get("failed") or []
+                        lines = [
+                            "执行成功",
+                            f"- 命令ID：{execution.get('command_id')}",
+                            f"- 扫描：{scanned}",
+                            f"- 待处理：{pending}",
+                            f"- 导入成功：{imported_count}",
+                            f"- 导入失败：{failed_count}",
+                        ]
+                        if imported_files:
+                            names = ", ".join(Path(str(f)).stem for f in imported_files[:5])
+                            extra = f"（等 {len(imported_files)} 条）" if len(imported_files) > 5 else ""
+                            lines.append(f"- 导入文件：{names}{extra}")
+                        if failed_files:
+                            names = ", ".join(str(f) for f in failed_files[:5])
+                            lines.append(f"- 失败文件：{names}")
+                        result_message = "\n".join(lines)
                     else:
                         result_message = (
                             f"执行成功\n"
