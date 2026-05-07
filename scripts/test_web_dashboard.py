@@ -17,7 +17,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from core import db as db_module
 from core import paths as paths_module
-from scripts.web_dashboard import DashboardHandler, build_snapshot, handle_mutation
+from scripts.web_dashboard import DashboardHandler, HTML_PAGE, build_snapshot, handle_mutation
 from scripts.test_helpers import make_case_dir, reset_db_singleton
 
 
@@ -356,6 +356,13 @@ def test_health_endpoint() -> None:
     reset_db_singleton(db_module)
 
 
+def test_all_tasks_table_has_edit_actions() -> None:
+    assert "selectTaskById" in HTML_PAGE
+    assert "removeSelectedTask(false" in HTML_PAGE
+    assert "removeSelectedTask(true" in HTML_PAGE
+    assert "All Periodic Tasks" in HTML_PAGE
+
+
 if __name__ == "__main__":
     test_snapshot_excludes_linked_legacy_entries()
     print("[ok] snapshot excludes linked legacy entries")
@@ -367,3 +374,5 @@ if __name__ == "__main__":
     print("[ok] read-only server rejects mutation")
     test_health_endpoint()
     print("[ok] health endpoint returns db and metrics status")
+    test_all_tasks_table_has_edit_actions()
+    print("[ok] all periodic tasks table has edit/deactivate/delete actions")

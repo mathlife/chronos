@@ -943,11 +943,25 @@ HTML_PAGE = """<!doctype html>
         await load();
       } catch (e) { setResult(false, e.message); }
     }
-    async function removeSelectedTask(hard) {
+    function selectTaskById(taskId, showMessage = true) {
+      const id = Number(taskId || 0);
+      const select = document.getElementById('editTaskSelect');
+      if (select) select.value = id > 0 ? String(id) : '';
+      loadSelectedTask(showMessage);
+      if (id > 0) {
+        const taskOpsSection = document.getElementById('editTaskSelect');
+        if (taskOpsSection && typeof taskOpsSection.scrollIntoView === 'function') {
+          taskOpsSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }
+    }
+    async function removeSelectedTask(hard, taskId = null) {
       try {
         ensureWritableAction();
         const select = document.getElementById('editTaskSelect');
-        const id = Number((select && select.value) || 0);
+        const id = taskId == null
+          ? Number((select && select.value) || 0)
+          : Number(taskId || 0);
         if (!id) throw new Error('select a task first');
         if (hard) {
           const sure = window.prompt(`Type DELETE-${id} to confirm hard deletion`);
@@ -1011,7 +1025,7 @@ db_path: ${esc(s.db_path)}</pre>
       tasksCache = tasks;
       renderTaskOptions(backgroundRefresh);
       document.getElementById('tasks').innerHTML = table(
-        ['id','name','active','kind','cycle','time','delivery_target','source'],
+        ['id','name','active','kind','cycle','time','delivery_target','source','actions'],
         tasks.map(t => [
           esc(t.id),
           esc(t.name),
@@ -1020,7 +1034,8 @@ db_path: ${esc(s.db_path)}</pre>
           esc(t.cycle_type),
           esc(t.time_of_day || ''),
           esc(t.delivery_target || ''),
-          esc(t.source || '')
+          esc(t.source || ''),
+          `<div class="btns"><button class="alt" onclick='selectTaskById(${JSON.stringify(Number(t.id || 0))})'>Edit</button><button class="warn" onclick='removeSelectedTask(false, ${JSON.stringify(Number(t.id || 0))})'>Deactivate</button><button class="warn" onclick='removeSelectedTask(true, ${JSON.stringify(Number(t.id || 0))})'>Delete</button></div>`
         ])
       );
     }
