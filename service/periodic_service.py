@@ -394,6 +394,13 @@ class PeriodicTaskManager:
         time_of_day = row["scheduled_time"] or row["time_of_day"]
         if not time_of_day:
             return False
+
+        # Defensive re-check: the occurrence may have been completed after the scheduler
+        # started but before delivery is attempted.
+        fresh_row = self._get_occurrence_row(occurrence_id)
+        if not fresh_row or fresh_row["status"] in ("completed", "skipped"):
+            return False
+
         message_text = self._format_reminder_message(row["name"], occ_date, time_of_day, row["reminder_template"], immediate=False)
         task_dict = {"id": row["task_id"], "name": row["name"], "task_kind": row["task_kind"], "delivery_target": row["delivery_target"]}
         if not self._send_message_now(message_text, task=task_dict, occurrence_id=occurrence_id):
