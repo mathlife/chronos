@@ -278,6 +278,30 @@ class PeriodicTaskManager:
         )
         db_commit()
 
+    def _clear_day_reminder_jobs(self, *, task_id: int, occ_day: date) -> None:
+        rows = self.db.execute(
+            """
+            SELECT id, reminder_job_id, execution_job_id
+            FROM periodic_occurrences
+            WHERE task_id = ? AND date = ?
+              AND (reminder_job_id IS NOT NULL OR execution_job_id IS NOT NULL)
+            """,
+            (task_id, occ_day.isoformat()),
+        ).fetchall()
+        for occ_id, reminder_job_name, execution_job_name in rows:
+            try:
+                if reminder_job_name:
+                    remove_job(reminder_job_name)
+                if execution_job_name:
+                    remove_job(execution_job_name)
+            except Exception:
+                # best-effort cleanup; DB pointers are still cleared to avoid stale re-trigger intents
+                pass
+            self.db.execute(
+                "UPDATE periodic_occurrences SET reminder_job_id = NULL, execution_job_id = NULL WHERE id = ?",
+                (occ_id,),
+            )
+
     def _complete_occurrence_internal(
         self,
         occurrence_id: int,
@@ -317,6 +341,8 @@ class PeriodicTaskManager:
                     occ_day = to_shanghai_date()
             else:
                 occ_day = to_shanghai_date()
+            # When one occurrence is manually completed, clear same-day reminder/execution jobs for this task.
+            self._clear_day_reminder_jobs(task_id=task_id, occ_day=occ_day)
             self._apply_monthly_quota_completion(task_id=task_id, occurrence_date=occ_day, task_row=cycle_type_row)
             db_commit()
         return True
