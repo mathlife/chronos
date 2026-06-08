@@ -38,7 +38,18 @@ def _emit(payload: dict, *, code: int) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Chronos integration JSON API")
+    parser = argparse.ArgumentParser(
+        description="Chronos integration JSON API",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  chronos_api.py task list --active-only true\n"
+            "  chronos_api.py task get --id 42\n"
+            "  chronos_api.py task create --payload '{\"name\":\"Daily review\",\"cycle_type\":\"daily\",\"time_of_day\":\"09:00\"}'\n"
+            "  chronos_api.py channel replace --payload @channels.json\n\n"
+            "Output is always JSON with shape: {\"ok\": bool, \"data\": ..., \"error\": ...}."
+        ),
+    )
     subparsers = parser.add_subparsers(dest="resource", required=True)
 
     task_parser = subparsers.add_parser("task", help="Task operations")

@@ -33,7 +33,12 @@ from core.models import ALLOWED_CYCLE_TYPES
 from core.scheduler import resolve_monthly_quota_window
 from core.system_command_runner import execute_system_handler
 from core.system_scheduler import remove_job
-from scripts.subagent_sync_ledger import looks_like_subagent_session
+from scripts.todo_nl import parse_natural_language
+try:
+    from scripts.subagent_sync_ledger import looks_like_subagent_session
+except ModuleNotFoundError:
+    def looks_like_subagent_session(session_id: str | None) -> bool:
+        return bool(session_id)
 
 MANAGER_SCRIPT = SCRIPTS_DIR / 'periodic_task_manager.py'
 CYCLE_TYPES = list(ALLOWED_CYCLE_TYPES)
@@ -129,36 +134,68 @@ def validate_add_args(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Chronos unified todo", add_help=True)
+    parser = argparse.ArgumentParser(
+        description="Chronos unified todo",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  todo.py list --include-skipped\n"
+            "  todo.py add \"写日报\" --cycle-type daily --time 09:00\n"
+            "  todo.py add \"每周例会\" --cycle-type weekly --weekday 0 --time 10:00\n"
+            "  todo.py complete FIN-123\n"
+            "  todo.py complete-overdue --dry-run\n\n"
+            "Compatibility notes:\n"
+            "  - monthly_fixed remains supported; it is normalized to monthly_dates.\n"
+            "  - monthly_n_times remains supported; it is normalized to monthly_range.\n"
+            "  - You can still pass natural-language instructions without a subcommand."
+        ),
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     list_parser = subparsers.add_parser("list", help="List all pending tasks")
     list_parser.add_argument("--include-skipped", action="store_true", help="Include skipped tasks in the list view")
 
-    add_parser = subparsers.add_parser("add", help="Add a task")
+    add_parser = subparsers.add_parser(
+        "add",
+        help="Add a task",
+        description=(
+            "Add a one-off or recurring task. Legacy monthly aliases are still accepted:\n"
+            "- monthly_fixed -> monthly_dates\n"
+            "- monthly_n_times -> monthly_range"
+        ),
+    )
     add_parser.add_argument("name", help="Task name")
-    add_parser.add_argument("--category", default="Inbox")
-    add_parser.add_argument("--cycle-type", default="once", choices=CYCLE_TYPES)
-    add_parser.add_argument("--time", dest="time_of_day", type=parse_time_of_day, default="09:00")
-    add_parser.add_argument("--weekday", type=int)
-    add_parser.add_argument("--day", dest="day_of_month", type=int)
-    add_parser.add_argument("--range-start", type=int)
-    add_parser.add_argument("--range-end", type=int)
-    add_parser.add_argument("--n-per-month", type=int)
-    add_parser.add_argument("--interval-hours", type=int)
-    add_parser.add_argument("--dates-list")
-    add_parser.add_argument("--start-date")
-    add_parser.add_argument("--end-date")
-    add_parser.add_argument("--reminder-template")
-    add_parser.add_argument("--task-kind", default="scheduled")
-    add_parser.add_argument("--special-handler")
-    add_parser.add_argument("--handler-payload")
-    add_parser.add_argument("--system-command")
+    add_parser.add_argument("--category", default="Inbox", help="Task category/group name")
+    add_parser.add_argument(
+        "--cycle-type",
+        default="once",
+        choices=CYCLE_TYPES,
+        help="Schedule type. monthly_fixed/monthly_n_times are accepted for compatibility.",
+    )
+    add_parser.add_argument("--time", dest="time_of_day", type=parse_time_of_day, default="09:00", help="Scheduled time in HH:MM")
+    add_parser.add_argument("--weekday", type=int, help="Weekday for weekly/monthly quota tasks (Mon=0 .. Sun=6)")
+    add_parser.add_argument("--day", dest="day_of_month", type=int, help="Day of month for monthly_fixed alias")
+    add_parser.add_argument("--range-start", type=int, help="Start day for monthly_range window")
+    add_parser.add_argument("--range-end", type=int, help="End day for monthly_range window")
+    add_parser.add_argument("--n-per-month", type=int, help="Monthly quota count for monthly_n_times/monthly_range")
+    add_parser.add_argument("--interval-hours", type=int, help="Hour interval for hourly tasks")
+    add_parser.add_argument("--dates-list", help="Comma-separated days for monthly_dates, e.g. 1,15,28")
+    add_parser.add_argument("--start-date", help="Start date for once tasks or delayed activation (YYYY-MM-DD)")
+    add_parser.add_argument("--end-date", help="Optional end date (YYYY-MM-DD)")
+    add_parser.add_argument("--reminder-template", help="Custom reminder message template")
+    add_parser.add_argument("--task-kind", default="scheduled", help="Task kind, e.g. scheduled or system")
+    add_parser.add_argument("--special-handler", help="Special handler name for system/special tasks")
+    add_parser.add_argument("--handler-payload", help="JSON/text payload passed to special handler")
+    add_parser.add_argument("--system-command", help="System command ID for --task-kind system tasks")
 
     complete_parser = subparsers.add_parser("complete", help="Complete a task")
     complete_parser.add_argument("identifier")
 
-    complete_overdue_parser = subparsers.add_parser("complete-overdue", help="Complete today's overdue scheduled tasks")
+    complete_overdue_parser = subparsers.add_parser(
+        "complete-overdue",
+        help="Complete today's overdue scheduled tasks",
+        description="Complete overdue tasks from today. Use --system-only to limit processing to system tasks.",
+    )
     complete_overdue_parser.add_argument("--dry-run", action="store_true", help="Show what would be completed without changing state")
     complete_overdue_parser.add_argument("--system-only", action="store_true", help="Only process overdue system tasks and skip regular scheduled/legacy tasks")
     complete_overdue_parser.add_argument("--now", dest="now_override", help="Testing override for current timestamp (YYYY-MM-DDTHH:MM)")
@@ -195,145 +232,6 @@ def parse_compact_end_date(date_str: str) -> str | None:
         return date(year, month, day).isoformat()
     except ValueError:
         return None
-
-
-def parse_natural_language(text: str) -> dict:
-    text = text.strip()
-
-    if re.search(r'逾期|过时|已过时间', text) and re.search(r'完成|补完成|自动完成', text):
-        return {'cmd': 'complete-overdue'}
-
-    if re.search(r'查询|查看|今日|待办|任务', text) and not re.search(r'添加|新增|创建', text):
-        if '详情' in text or re.search(r'FIN-\d+|ID\d+', text):
-            match = re.search(r'(FIN-\d+|ID\d+)', text)
-            if match:
-                return {'cmd': 'show', 'identifier': match.group(1)}
-        else:
-            return {'cmd': 'list'}
-
-    if re.search(r'跳过|跳過|skipping?', text):
-        match = re.search(r'(FIN-\d+|ID\d+)', text)
-        if match:
-            return {'cmd': 'skip', 'identifier': match.group(1)}
-        return {'cmd': 'skip', 'identifier': None}
-
-    if re.search(r'完成|标记完成', text):
-        match = re.search(r'(FIN-\d+|ID\d+)', text)
-        if match:
-            return {'cmd': 'complete', 'identifier': match.group(1)}
-        return {'cmd': 'complete', 'identifier': None}
-
-    if re.search(r'添加|新增|创建', text):
-        end_date = None
-        end_match = re.search(r'到(\d{4})年(\d{1,2})月(\d{1,2})日结束', text)
-        if end_match:
-            year = int(end_match.group(1))
-            month = int(end_match.group(2))
-            day = int(end_match.group(3))
-            end_date = f"{year:04d}-{month:02d}-{day:02d}"
-        else:
-            end_match2 = re.search(r'到(\d{1,2})月(\d{1,2})日结束', text)
-            if end_match2:
-                month = int(end_match2.group(1))
-                day = int(end_match2.group(2))
-                year = datetime.now().year
-                end_date = f"{year:04d}-{month:02d}-{day:02d}"
-            else:
-                end_match3 = re.search(r'结束日期(\d{6,8})', text)
-                if end_match3:
-                    end_date = parse_compact_end_date(end_match3.group(1))
-
-        text_clean = re.sub(r'到\d{4}年\d{1,2}月\d{1,2}日结束', '', text)
-        text_clean = re.sub(r'到\d{1,2}月\d{1,2}日结束', '', text_clean)
-        text_clean = re.sub(r'结束日期\d{6,8}', '', text_clean)
-
-        name = '新任务'
-        call_match = re.search(r'叫\s*(.+?)(?:，|,|$)', text_clean)
-        if call_match:
-            name = call_match.group(1).strip()
-        else:
-            after_add = re.sub(r'^添加\s*(?:待办|任务)?\s*[，,]\s*', '', text_clean)
-            weekday_pattern = r'(周[一二三四五六日天]|星期[一二三四五六日天])\s*(\d{1,2})(?:[:：]\s*(\d{2}))?点?'
-            m = re.search(weekday_pattern, after_add)
-            if m:
-                end_pos = m.end()
-                remaining = after_add[end_pos:].strip('，, ')
-                if remaining:
-                    name = remaining
-                else:
-                    before_part = after_add[:m.start()].strip('，, ')
-                    if before_part:
-                        name = before_part
-            else:
-                keywords = ['每周', '每天', '每日', '每月', '每小时']
-                first_kw_pos = len(after_add)
-                for kw in keywords:
-                    pos = after_add.find(kw)
-                    if pos != -1 and pos < first_kw_pos:
-                        first_kw_pos = pos
-                if first_kw_pos > 0:
-                    name = after_add[:first_kw_pos].strip('，, ')
-                else:
-                    name = after_add.strip('，, ')
-
-        name = re.sub(r'，|,|到\d+年.*$|到.*结束$', '', name).strip()
-        if not name:
-            name = '新任务'
-
-        params = {'name': name}
-
-        every_hours = re.search(r'每\s*(\d+)\s*小时', text)
-        if every_hours:
-            params['cycle_type'] = 'hourly'
-            params['interval_hours'] = int(every_hours.group(1))
-        elif '每月' in text and ('次' in text or '最多' in text):
-            params['cycle_type'] = 'monthly_n_times'
-            n_match = re.search(r'每月最多?(\d+)次', text)
-            if n_match:
-                params['n_per_month'] = int(n_match.group(1))
-            weekday_map = {'一': 0, '二': 1, '三': 2, '四': 3, '五': 4, '六': 5, '日': 6, '天': 6}
-            for char, num in weekday_map.items():
-                if f'周{char}' in text or f'星期{char}' in text:
-                    params['weekday'] = num
-                    break
-        elif '每月' in text and ('号' in text or '日' in text):
-            if '到' in text or '至' in text:
-                params['cycle_type'] = 'monthly_range'
-                range_match = re.search(r'每月(\d+)号到(\d+)号', text)
-                if range_match:
-                    params['range_start'] = int(range_match.group(1))
-                    params['range_end'] = int(range_match.group(2))
-            else:
-                params['cycle_type'] = 'monthly_fixed'
-                day_match = re.search(r'每月(\d+)号', text)
-                if day_match:
-                    params['day_of_month'] = int(day_match.group(1))
-        elif '每周' in text:
-            params['cycle_type'] = 'weekly'
-            weekday_map = {'一': 0, '二': 1, '三': 2, '四': 3, '五': 4, '六': 5, '日': 6, '天': 6}
-            for char, num in weekday_map.items():
-                if f'周{char}' in text or f'星期{char}' in text:
-                    params['weekday'] = num
-                    break
-        elif '每天' in text or '每日' in text:
-            params['cycle_type'] = 'daily'
-
-        time_match = re.search(r'(\d{1,2})[:：]\s*(\d{2})', text)
-        if not time_match:
-            time_match = re.search(r'(\d{1,2})点', text)
-        if time_match:
-            hour = int(time_match.group(1))
-            minute = int(time_match.group(2)) if time_match.lastindex and time_match.lastindex >= 2 else 0
-            params['time_of_day'] = f"{hour:02d}:{minute:02d}"
-        else:
-            params['time_of_day'] = '09:00'
-
-        if end_date:
-            params['end_date'] = end_date
-
-        return {'cmd': 'add', **params}
-
-    return {'cmd': 'unknown', 'text': text}
 
 
 def get_periodic_pending(include_skipped: bool = False):
@@ -1045,44 +943,46 @@ def cmd_list(include_skipped: bool = False):
             print("✅ 没有待办任务。")
 
 
+def build_periodic_manager_args(text: str, *, category: str, cycle_type: str, kwargs: dict[str, object]) -> list[str]:
+    args = [
+        PYTHON_BIN,
+        str(MANAGER_SCRIPT),
+        '--add',
+        '--name', text,
+        '--category', category,
+        '--cycle-type', cycle_type,
+        '--time', str(kwargs.get('time', '09:00')),
+    ]
+    option_specs: list[tuple[str, str]] = [
+        ('weekday', '--weekday'),
+        ('day_of_month', '--day'),
+        ('n_per_month', '--n-per-month'),
+        ('interval_hours', '--interval-hours'),
+        ('dates_list', '--dates-list'),
+        ('start_date', '--start-date'),
+        ('end_date', '--end-date'),
+        ('reminder_template', '--reminder-template'),
+        ('task_kind', '--task-kind'),
+        ('special_handler', '--special-handler'),
+        ('handler_payload', '--handler-payload'),
+        ('system_command', '--system-command'),
+    ]
+    for key, flag in option_specs:
+        value = kwargs.get(key)
+        if value not in (None, ''):
+            args.extend([flag, str(value)])
+    range_start = kwargs.get('range_start')
+    range_end = kwargs.get('range_end')
+    if range_start is not None and range_end is not None:
+        args.extend(['--range-start', str(range_start), '--range-end', str(range_end)])
+    return args
+
+
 def cmd_add(text, category='Inbox', cycle_type='once', **kwargs):
     is_scheduled_once = cycle_type == 'once' and kwargs.get('start_date')
     is_scheduled_recurring = cycle_type != 'once'
     if is_scheduled_once or is_scheduled_recurring:
-        args = [
-            PYTHON_BIN, str(MANAGER_SCRIPT),
-            '--add',
-            '--name', text,
-            '--category', category,
-            '--cycle-type', cycle_type,
-            '--time', kwargs.get('time', '09:00'),
-        ]
-        if 'weekday' in kwargs:
-            args.extend(['--weekday', str(kwargs['weekday'])])
-        if 'day_of_month' in kwargs:
-            args.extend(['--day', str(kwargs['day_of_month'])])
-        if 'range_start' in kwargs and 'range_end' in kwargs:
-            args.extend(['--range-start', str(kwargs['range_start']), '--range-end', str(kwargs['range_end'])])
-        if 'n_per_month' in kwargs:
-            args.extend(['--n-per-month', str(kwargs['n_per_month'])])
-        if 'interval_hours' in kwargs:
-            args.extend(['--interval-hours', str(kwargs['interval_hours'])])
-        if 'dates_list' in kwargs:
-            args.extend(['--dates-list', str(kwargs['dates_list'])])
-        if 'start_date' in kwargs:
-            args.extend(['--start-date', kwargs['start_date']])
-        if 'end_date' in kwargs:
-            args.extend(['--end-date', kwargs['end_date']])
-        if 'reminder_template' in kwargs:
-            args.extend(['--reminder-template', kwargs['reminder_template']])
-        if 'task_kind' in kwargs:
-            args.extend(['--task-kind', kwargs['task_kind']])
-        if 'special_handler' in kwargs and kwargs['special_handler']:
-            args.extend(['--special-handler', kwargs['special_handler']])
-        if 'handler_payload' in kwargs and kwargs['handler_payload']:
-            args.extend(['--handler-payload', kwargs['handler_payload']])
-        if 'system_command' in kwargs and kwargs['system_command']:
-            args.extend(['--system-command', kwargs['system_command']])
+        args = build_periodic_manager_args(text, category=category, cycle_type=cycle_type, kwargs=kwargs)
 
         result = subprocess.run(args, capture_output=True, text=True)
         if result.returncode == 0:
@@ -1299,6 +1199,62 @@ def cmd_show(identifier):
             print(f"❌ 未找到 ID {entry_id}")
 
 
+
+def build_add_kwargs(
+    *,
+    category: str,
+    cycle_type: str,
+    time_of_day: str,
+    task_kind: str | None = None,
+    weekday: int | None = None,
+    day_of_month: int | None = None,
+    range_start: int | None = None,
+    range_end: int | None = None,
+    n_per_month: int | None = None,
+    interval_hours: int | None = None,
+    dates_list: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    reminder_template: str | None = None,
+    special_handler: str | None = None,
+    handler_payload: str | None = None,
+    system_command: str | None = None,
+) -> dict[str, object]:
+    kwargs: dict[str, object] = {
+        'category': category,
+        'cycle_type': cycle_type,
+        'time': time_of_day,
+    }
+    if task_kind is not None:
+        kwargs['task_kind'] = task_kind
+    if weekday is not None:
+        kwargs['weekday'] = weekday
+    if day_of_month is not None:
+        kwargs['day_of_month'] = day_of_month
+    if range_start is not None:
+        kwargs['range_start'] = range_start
+    if range_end is not None:
+        kwargs['range_end'] = range_end
+    if n_per_month is not None:
+        kwargs['n_per_month'] = n_per_month
+    if interval_hours is not None:
+        kwargs['interval_hours'] = interval_hours
+    if dates_list is not None:
+        kwargs['dates_list'] = dates_list
+    if start_date is not None:
+        kwargs['start_date'] = start_date
+    if end_date is not None:
+        kwargs['end_date'] = end_date
+    if reminder_template is not None:
+        kwargs['reminder_template'] = reminder_template
+    if special_handler is not None:
+        kwargs['special_handler'] = special_handler
+    if handler_payload is not None:
+        kwargs['handler_payload'] = handler_payload
+    if system_command is not None:
+        kwargs['system_command'] = system_command
+    return kwargs
+
 def main():
     if len(sys.argv) < 2:
         print("用法：todo.py [list|add|complete|complete-overdue|skip|show] [参数] 或直接说自然语言")
@@ -1314,6 +1270,10 @@ def main():
         print('  "自动完成逾期待办"      - 补完成今日已过时间的任务')
         sys.exit(1)
 
+    if sys.argv[1] in ('-h', '--help'):
+        build_parser().print_help()
+        return
+
     explicit_cmd = sys.argv[1]
     if explicit_cmd in ['list', 'add', 'complete', 'complete-overdue', 'show', 'skip']:
         parser = build_parser()
@@ -1328,38 +1288,25 @@ def main():
                 print(f"参数错误：{exc}")
                 sys.exit(2)
 
-            kwargs = {
-                'category': args.category,
-                'cycle_type': args.cycle_type,
-                'time': args.time_of_day,
-                'task_kind': args.task_kind,
-            }
-            if args.weekday is not None:
-                kwargs['weekday'] = args.weekday
-            if args.day_of_month is not None:
-                kwargs['day_of_month'] = args.day_of_month
-            if args.range_start is not None:
-                kwargs['range_start'] = args.range_start
-            if args.range_end is not None:
-                kwargs['range_end'] = args.range_end
-            if args.n_per_month is not None:
-                kwargs['n_per_month'] = args.n_per_month
-            if args.interval_hours is not None:
-                kwargs['interval_hours'] = args.interval_hours
-            if args.dates_list is not None:
-                kwargs['dates_list'] = args.dates_list
-            if args.start_date is not None:
-                kwargs['start_date'] = args.start_date
-            if args.end_date is not None:
-                kwargs['end_date'] = args.end_date
-            if args.reminder_template is not None:
-                kwargs['reminder_template'] = args.reminder_template
-            if args.special_handler is not None:
-                kwargs['special_handler'] = args.special_handler
-            if args.handler_payload is not None:
-                kwargs['handler_payload'] = args.handler_payload
-            if args.system_command is not None:
-                kwargs['system_command'] = args.system_command
+            kwargs = build_add_kwargs(
+                category=args.category,
+                cycle_type=args.cycle_type,
+                time_of_day=args.time_of_day,
+                task_kind=args.task_kind,
+                weekday=args.weekday,
+                day_of_month=args.day_of_month,
+                range_start=args.range_start,
+                range_end=args.range_end,
+                n_per_month=args.n_per_month,
+                interval_hours=args.interval_hours,
+                dates_list=args.dates_list,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                reminder_template=args.reminder_template,
+                special_handler=args.special_handler,
+                handler_payload=args.handler_payload,
+                system_command=args.system_command,
+            )
 
             cmd_add(args.name, **kwargs)
         elif args.command == 'skip':
@@ -1372,7 +1319,7 @@ def main():
             cmd_show(args.identifier)
     else:
         nl_text = ' '.join(sys.argv[1:])
-        parsed = parse_natural_language(nl_text)
+        parsed = parse_natural_language(nl_text, parse_compact_end_date=parse_compact_end_date)
         if parsed['cmd'] == 'unknown':
             print(f"无法识别的指令：{nl_text}")
             print("支持的指令：添加待办、查询待办、完成任务、跳过任务、查看详情、自动完成逾期任务")
@@ -1414,25 +1361,18 @@ def main():
 
             print(f"🔍 解析结果：名称={name}, 周期={cycle_type}, 时间={time_of_day}, 星期={weekday}, 日期={day_of_month}, 区间={range_start}-{range_end}, 次数={n_per_month}, 间隔小时={interval_hours}, 结束={end_date}")
 
-            kwargs = {
-                'category': category,
-                'cycle_type': cycle_type,
-                'time': time_of_day,
-            }
-            if weekday is not None:
-                kwargs['weekday'] = weekday
-            if day_of_month is not None:
-                kwargs['day_of_month'] = day_of_month
-            if range_start is not None:
-                kwargs['range_start'] = range_start
-            if range_end is not None:
-                kwargs['range_end'] = range_end
-            if n_per_month is not None:
-                kwargs['n_per_month'] = n_per_month
-            if interval_hours is not None:
-                kwargs['interval_hours'] = interval_hours
-            if end_date is not None:
-                kwargs['end_date'] = end_date
+            kwargs = build_add_kwargs(
+                category=category,
+                cycle_type=cycle_type,
+                time_of_day=time_of_day,
+                weekday=weekday,
+                day_of_month=day_of_month,
+                range_start=range_start,
+                range_end=range_end,
+                n_per_month=n_per_month,
+                interval_hours=interval_hours,
+                end_date=end_date,
+            )
 
             cmd_add(name, **kwargs)
 
