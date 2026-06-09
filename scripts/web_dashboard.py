@@ -22,6 +22,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from core.config import get_raw_config, inspect_config, save_raw_config
 from core.integration_api import create_task, delete_channel, put_channel, remove_task, update_task
 from core.observability import METRICS, emit_log
+from core.occurrence_state import OccurrenceStateStore, iter_job_refs, iter_job_refs_from_pair
 from core.paths import TODO_DB
 from core.system_scheduler import remove_job, supports_system_scheduler
 from core.timezones import get_shanghai_tz
@@ -1403,6 +1404,20 @@ def _validate_today_status(value: Any) -> str:
     return status
 
 
+def _remove_scheduler_jobs_for_payload(payload: dict[str, Any]) -> None:
+    if not supports_system_scheduler():
+        return
+    for _kind, job_name in iter_job_refs(payload):
+        remove_job(job_name)
+
+
+def _remove_scheduler_jobs_for_pair(reminder_job_id: Any, execution_job_id: Any) -> None:
+    if not supports_system_scheduler():
+        return
+    for _kind, job_name in iter_job_refs_from_pair(reminder_job_id, execution_job_id):
+        remove_job(job_name)
+
+
 def update_today_task(db_path: Path, *, identifier: str, patch: dict) -> dict:
     kind, row_id = _parse_today_identifier(identifier)
     patch = _expect_object(patch, field_name="patch")
@@ -1414,9 +1429,11 @@ def update_today_task(db_path: Path, *, identifier: str, patch: dict) -> dict:
     conn = _db_connect(db_path)
     try:
         if kind == "occurrence":
+            occurrence_columns = {info[1] for info in conn.execute("PRAGMA table_info(periodic_occurrences)").fetchall()}
+            execution_expr = "o.execution_job_id" if "execution_job_id" in occurrence_columns else "NULL AS execution_job_id"
             row = conn.execute(
-                """
-                SELECT o.id, o.task_id, o.reminder_job_id, o.execution_job_id
+                f"""
+                SELECT o.id, o.task_id, o.reminder_job_id, {execution_expr}
                 FROM periodic_occurrences o
                 WHERE o.id = ?
                 """,
@@ -1424,24 +1441,43 @@ def update_today_task(db_path: Path, *, identifier: str, patch: dict) -> dict:
             ).fetchone()
             if row is None:
                 raise ValueError(f"today task {identifier} not found")
-            reminder_job_id = row["reminder_job_id"]
-            execution_job_id = row["execution_job_id"]
-            if reminder_job_id and supports_system_scheduler():
-                remove_job(str(reminder_job_id))
-            if execution_job_id and supports_system_scheduler():
-                remove_job(str(execution_job_id))
             conn.execute(
                 "UPDATE periodic_tasks SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (name, int(row["task_id"])),
             )
-            conn.execute(
-                """
-                UPDATE periodic_occurrences
-                SET status = ?, scheduled_time = ?, reminder_job_id = NULL, execution_job_id = NULL
-                WHERE id = ?
-                """,
-                (status, scheduled_time, row_id),
-            )
+            state_store = OccurrenceStateStore(conn)
+            if status == "completed":
+                changed = state_store.complete(
+                    row_id,
+                    completion_mode="manual",
+                    completion_source="web_dashboard",
+                    trigger_label="web_today_update",
+                    trigger_command="web_dashboard today update",
+                    commit=False,
+                )
+                if changed:
+                    _remove_scheduler_jobs_for_pair(row["reminder_job_id"], row["execution_job_id"])
+            elif status == "skipped":
+                changed = state_store.skip(
+                    row_id,
+                    completion_mode="manual",
+                    completion_source="web_dashboard",
+                    trigger_label="web_today_update",
+                    trigger_command="web_dashboard today update",
+                    commit=False,
+                )
+                if changed:
+                    _remove_scheduler_jobs_for_pair(row["reminder_job_id"], row["execution_job_id"])
+            else:
+                job_refs = state_store.update_non_terminal(
+                    row_id,
+                    status=status,
+                    scheduled_time=scheduled_time,
+                    commit=False,
+                )
+                _remove_scheduler_jobs_for_pair(job_refs[0], job_refs[1])
+            if status in {"completed", "skipped"}:
+                conn.execute("UPDATE periodic_occurrences SET scheduled_time = ? WHERE id = ?", (scheduled_time, row_id))
             conn.commit()
             return {"identifier": identifier, "kind": kind, "id": row_id}
         row = conn.execute("SELECT id FROM entries WHERE id = ?", (row_id,)).fetchone()
@@ -1459,18 +1495,10 @@ def remove_today_task(db_path: Path, *, identifier: str) -> dict:
     conn = _db_connect(db_path)
     try:
         if kind == "occurrence":
-            row = conn.execute(
-                "SELECT reminder_job_id, execution_job_id FROM periodic_occurrences WHERE id = ?",
-                (row_id,),
-            ).fetchone()
-            if row is None:
+            if conn.execute("SELECT 1 FROM periodic_occurrences WHERE id = ?", (row_id,)).fetchone() is None:
                 raise ValueError(f"today task {identifier} not found")
-            reminder_job_id = row["reminder_job_id"]
-            execution_job_id = row["execution_job_id"]
-            if reminder_job_id and supports_system_scheduler():
-                remove_job(str(reminder_job_id))
-            if execution_job_id and supports_system_scheduler():
-                remove_job(str(execution_job_id))
+            job_refs = OccurrenceStateStore(conn).clear_jobs(row_id, commit=False)
+            _remove_scheduler_jobs_for_pair(job_refs[0], job_refs[1])
             conn.execute("DELETE FROM periodic_occurrences WHERE id = ?", (row_id,))
             conn.commit()
             return {"identifier": identifier, "kind": kind, "id": row_id}

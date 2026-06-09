@@ -13,6 +13,7 @@ from core.learning import LearningContext
 from core.models import PeriodicTask
 from core.notifiers import dispatch_message
 from core.observability import METRICS, emit_log
+from core.occurrence_state import OccurrenceStateStore
 from core.paths import PYTHON_BIN, SCRIPTS_DIR
 from core.scheduler import TaskScheduler, resolve_monthly_quota_window, to_shanghai_date
 from core.system_command_runner import execute_system_handler
@@ -27,6 +28,7 @@ class PeriodicTaskManager:
 
     def __init__(self):
         self.db = DB()
+        self.occurrence_state = OccurrenceStateStore(self.db)
 
     def add_activity(self, **params) -> int:
         """Add a new periodic task."""
@@ -162,30 +164,13 @@ class PeriodicTaskManager:
             """,
             (task_id, start_day.isoformat(), end_day.isoformat()),
         )
-        cleanup_rows = self.db.execute(
-            """
-            SELECT reminder_job_id, execution_job_id
-            FROM periodic_occurrences
-            WHERE task_id = ? AND status = 'completed'
-              AND date >= ? AND date <= ?
-              AND (reminder_job_id IS NOT NULL OR execution_job_id IS NOT NULL)
-            """,
-            (task_id, start_day.isoformat(), end_day.isoformat()),
-        ).fetchall()
-        for reminder_job_name, execution_job_name in cleanup_rows:
-            if reminder_job_name:
-                remove_job(reminder_job_name)
-            if execution_job_name:
-                remove_job(execution_job_name)
-        self.db.execute(
-            """
-            UPDATE periodic_occurrences
-            SET reminder_job_id = NULL, execution_job_id = NULL
-            WHERE task_id = ? AND status = 'completed'
-              AND date >= ? AND date <= ?
-            """,
-            (task_id, start_day.isoformat(), end_day.isoformat()),
+        cleanup_ids = self.occurrence_state.find_completed_ids_with_jobs_in_date_window(
+            task_id,
+            start_day.isoformat(),
+            end_day.isoformat(),
         )
+        for occ_id in cleanup_ids:
+            self._clear_occurrence_jobs(occ_id)
 
     def create_occurrence_if_missing(self, task_id: int, occ_date: date, scheduled_time: str | None = None) -> int:
         task = get_periodic_task(task_id)
@@ -212,10 +197,21 @@ class PeriodicTaskManager:
         row = cur.fetchone()
         return row[0] if row else None
 
+    def _occurrence_has_column(self, column: str) -> bool:
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(periodic_occurrences)").fetchall()}
+        return column in columns
+
+    def _execution_job_select_expr(self, table_alias: str | None = None) -> str:
+        if not self._occurrence_has_column("execution_job_id"):
+            return "NULL AS execution_job_id"
+        prefix = f"{table_alias}." if table_alias else ""
+        return f"{prefix}execution_job_id"
+
     def _get_occurrence_row(self, occurrence_id: int):
+        execution_expr = self._execution_job_select_expr("o")
         return self.db.execute(
-            """
-            SELECT o.id, o.task_id, o.date, o.status, o.reminder_job_id, o.execution_job_id, o.scheduled_time,
+            f"""
+            SELECT o.id, o.task_id, o.date, o.status, o.reminder_job_id, {execution_expr}, o.scheduled_time,
                    t.name, t.task_kind, t.time_of_day, t.reminder_template, t.special_handler, t.handler_payload,
                    t.delivery_target
             FROM periodic_occurrences o
@@ -266,41 +262,27 @@ class PeriodicTaskManager:
         METRICS.inc("notify_success_total" if success else "notify_failure_total")
         return success
 
+    def _clear_occurrence_jobs(self, occurrence_id: int) -> None:
+        """Remove scheduler jobs, then clear DB pointers only after external cleanup succeeds."""
+        reminder_job_name, execution_job_name = self.occurrence_state.get_job_refs(occurrence_id)
+        try:
+            if reminder_job_name:
+                remove_job(reminder_job_name)
+            if execution_job_name:
+                remove_job(execution_job_name)
+        except Exception as exc:
+            METRICS.inc("scheduler_job_cleanup_error_total")
+            emit_log("scheduler.cleanup_remove_failed", level="ERROR", occurrence_id=occurrence_id, error=str(exc))
+            raise
+        self.occurrence_state.clear_jobs(occurrence_id, commit=False)
+
     def _mark_occurrence_reminded(self, occurrence_id: int, reminder_job_id: str | None = None) -> None:
-        self.db.execute(
-            """
-            UPDATE periodic_occurrences
-            SET status = CASE WHEN status = 'pending' THEN 'reminded' ELSE status END,
-                reminder_job_id = COALESCE(?, reminder_job_id)
-            WHERE id = ?
-            """,
-            (reminder_job_id, occurrence_id),
-        )
-        db_commit()
+        self.occurrence_state.mark_reminded(occurrence_id, reminder_job_id=reminder_job_id)
 
     def _clear_day_reminder_jobs(self, *, task_id: int, occ_day: date) -> None:
-        rows = self.db.execute(
-            """
-            SELECT id, reminder_job_id, execution_job_id
-            FROM periodic_occurrences
-            WHERE task_id = ? AND date = ?
-              AND (reminder_job_id IS NOT NULL OR execution_job_id IS NOT NULL)
-            """,
-            (task_id, occ_day.isoformat()),
-        ).fetchall()
-        for occ_id, reminder_job_name, execution_job_name in rows:
-            try:
-                if reminder_job_name:
-                    remove_job(reminder_job_name)
-                if execution_job_name:
-                    remove_job(execution_job_name)
-            except Exception:
-                # best-effort cleanup; DB pointers are still cleared to avoid stale re-trigger intents
-                pass
-            self.db.execute(
-                "UPDATE periodic_occurrences SET reminder_job_id = NULL, execution_job_id = NULL WHERE id = ?",
-                (occ_id,),
-            )
+        occurrence_ids = self.occurrence_state.find_ids_with_jobs_for_task_on_date(task_id, occ_day.isoformat())
+        for occ_id in occurrence_ids:
+            self._clear_occurrence_jobs(occ_id)
 
     def _complete_occurrence_internal(
         self,
@@ -308,21 +290,15 @@ class PeriodicTaskManager:
         *,
         completion_mode: str,
         special_handler_result: str | None = None,
+        clear_related_jobs: bool = True,
     ) -> bool:
-        cur = self.db.execute(
-            """
-            UPDATE periodic_occurrences
-            SET status = 'completed',
-                completed_at = CURRENT_TIMESTAMP,
-                completion_mode = ?,
-                special_handler_result = COALESCE(?, special_handler_result)
-            WHERE id = ? AND status != 'completed'
-            """,
-            (completion_mode, special_handler_result, occurrence_id),
-        )
-        if cur.rowcount <= 0:
+        if not self.occurrence_state.complete(
+            occurrence_id,
+            completion_mode=completion_mode,
+            special_handler_result=special_handler_result,
+            clear_jobs=False,
+        ):
             return False
-        db_commit()
         cur = self.db.execute("SELECT task_id FROM periodic_occurrences WHERE id = ?", (occurrence_id,))
         row = cur.fetchone()
         if row:
@@ -341,9 +317,10 @@ class PeriodicTaskManager:
                     occ_day = to_shanghai_date()
             else:
                 occ_day = to_shanghai_date()
-            # When one occurrence is manually completed, clear same-day reminder/execution jobs for this task.
-            self._clear_day_reminder_jobs(task_id=task_id, occ_day=occ_day)
-            self._apply_monthly_quota_completion(task_id=task_id, occurrence_date=occ_day, task_row=cycle_type_row)
+            if clear_related_jobs:
+                # When one occurrence is manually completed, clear same-day reminder/execution jobs for this task.
+                self._clear_day_reminder_jobs(task_id=task_id, occ_day=occ_day)
+                self._apply_monthly_quota_completion(task_id=task_id, occurrence_date=occ_day, task_row=cycle_type_row)
             db_commit()
         return True
 
@@ -354,23 +331,11 @@ class PeriodicTaskManager:
         completion_mode: str,
         special_handler_result: str | None = None,
     ) -> bool:
-        cur = self.db.execute(
-            """
-            UPDATE periodic_occurrences
-            SET status = 'skipped',
-                completed_at = CURRENT_TIMESTAMP,
-                completion_mode = ?,
-                special_handler_result = COALESCE(?, special_handler_result),
-                reminder_job_id = NULL,
-                execution_job_id = NULL
-            WHERE id = ? AND status NOT IN ('completed', 'skipped')
-            """,
-            (completion_mode, special_handler_result, occurrence_id),
+        return self.occurrence_state.skip(
+            occurrence_id,
+            completion_mode=completion_mode,
+            special_handler_result=special_handler_result,
         )
-        if cur.rowcount <= 0:
-            return False
-        db_commit()
-        return True
 
     def _schedule_system_occurrence_jobs(self, occurrence_id: int, occ_date: date, time_of_day: str) -> tuple[Optional[str], Optional[str]]:
         if not supports_system_scheduler():
@@ -508,11 +473,9 @@ class PeriodicTaskManager:
             occurrence_id,
             completion_mode="system_scheduler",
             special_handler_result=result_message,
+            clear_related_jobs=False,
         )
-        self.db.execute(
-            "UPDATE periodic_occurrences SET reminder_job_id = NULL, execution_job_id = NULL WHERE id = ?",
-            (occurrence_id,),
-        )
+        self._clear_occurrence_jobs(occurrence_id)
         db_commit()
 
         message_text = f"✅ 系统任务已执行\n任务：{row['name']}\n结果：{result_message or 'ok'}"
@@ -560,7 +523,11 @@ class PeriodicTaskManager:
                 if not occ_id:
                     continue
 
-                cur = self.db.execute("SELECT status, reminder_job_id, execution_job_id FROM periodic_occurrences WHERE id = ?", (occ_id,))
+                execution_expr = self._execution_job_select_expr()
+                cur = self.db.execute(
+                    f"SELECT status, reminder_job_id, {execution_expr} FROM periodic_occurrences WHERE id = ?",
+                    (occ_id,),
+                )
                 status, job_name, execution_job_id = cur.fetchone()
                 if status not in ('pending', 'reminded'):
                     continue
@@ -574,9 +541,11 @@ class PeriodicTaskManager:
                             METRICS.inc("scheduler_system_job_error_total")
                             emit_log("scheduler.system_job_schedule_failed", level="ERROR", occurrence_id=occ_id, error=str(exc))
                             continue
-                        self.db.execute(
-                            "UPDATE periodic_occurrences SET reminder_job_id = COALESCE(?, reminder_job_id), execution_job_id = ? WHERE id = ?",
-                            (reminder_job_name, execution_job_name, occ_id),
+                        self.occurrence_state.set_jobs(
+                            occ_id,
+                            reminder_job_id=reminder_job_name,
+                            execution_job_id=execution_job_name,
+                            commit=False,
                         )
                         db_commit()
                         METRICS.inc("scheduler_job_created_total")
@@ -585,38 +554,20 @@ class PeriodicTaskManager:
                 if not job_name:
                     job_name = self.schedule_reminder_job(occ_id, today, schedule_time)
                     if job_name:
-                        self.db.execute("UPDATE periodic_occurrences SET reminder_job_id = ? WHERE id = ?", (job_name, occ_id))
+                        self.occurrence_state.set_jobs(occ_id, reminder_job_id=job_name, commit=False)
                         db_commit()
                         scheduled += 1
 
         return scheduled
 
     def cleanup_old_jobs(self, before_date: date) -> int:
-        cur = self.db.execute(
-            """
-            SELECT o.id, o.reminder_job_id, o.execution_job_id, t.task_kind
-            FROM periodic_occurrences o
-            JOIN periodic_tasks t ON t.id = o.task_id
-            WHERE o.date <= ?
-              AND (o.reminder_job_id IS NOT NULL OR o.execution_job_id IS NOT NULL)
-            """,
-            (before_date.isoformat(),),
-        )
-        jobs = cur.fetchall()
+        occurrence_ids = self.occurrence_state.find_ids_with_jobs_before_or_on(before_date.isoformat())
 
         cleaned = 0
-        for occ_id, reminder_job_name, execution_job_name, task_kind in jobs:
-            reminder_removed = False
-            execution_removed = False
+        for occ_id in occurrence_ids:
             try:
-                reminder_removed = remove_job(reminder_job_name)
-                execution_removed = remove_job(execution_job_name)
-                if reminder_removed or execution_removed:
-                    self.db.execute(
-                        "UPDATE periodic_occurrences SET reminder_job_id = NULL, execution_job_id = NULL WHERE id = ?",
-                        (occ_id,),
-                    )
-                    cleaned += 1
+                self._clear_occurrence_jobs(occ_id)
+                cleaned += 1
             except Exception as e:
                 METRICS.inc("scheduler_job_cleanup_error_total")
                 emit_log("scheduler.cleanup_failed", level="ERROR", occurrence_id=occ_id, error=str(e))
@@ -666,26 +617,9 @@ class PeriodicTaskManager:
                         self._apply_monthly_quota_completion(task_id=task_id, occurrence_date=today, task_row=task_row)
                         db_commit()
 
-            cur = self.db.execute(
-                """
-                SELECT reminder_job_id, execution_job_id, COALESCE(t.task_kind, 'scheduled')
-                FROM periodic_occurrences o
-                JOIN periodic_tasks t ON t.id = o.task_id
-                WHERE o.task_id = ? AND (o.reminder_job_id IS NOT NULL OR o.execution_job_id IS NOT NULL)
-                """,
-                (task_id,),
-            )
-            jobs = cur.fetchall()
-            for reminder_job_name, execution_job_name, task_kind in jobs:
-                try:
-                    remove_job(reminder_job_name)
-                    remove_job(execution_job_name)
-                except Exception:
-                    pass
-            self.db.execute(
-                "UPDATE periodic_occurrences SET reminder_job_id = NULL, execution_job_id = NULL WHERE task_id = ?",
-                (task_id,),
-            )
+            occurrence_ids = self.occurrence_state.find_ids_with_jobs_for_task(task_id)
+            for occ_id in occurrence_ids:
+                self._clear_occurrence_jobs(occ_id)
             db_commit()
 
             return affected
@@ -730,17 +664,20 @@ class PeriodicTaskManager:
                 if not occ_id:
                     continue
                 if getattr(task, 'task_kind', 'scheduled') == 'system' and schedule_time:
+                    execution_expr = self._execution_job_select_expr()
                     row = self.db.execute(
-                        "SELECT execution_job_id FROM periodic_occurrences WHERE id = ?",
+                        f"SELECT {execution_expr} FROM periodic_occurrences WHERE id = ?",
                         (occ_id,),
                     ).fetchone()
                     execution_job_id = row[0] if row else None
                     if not execution_job_id:
                         try:
                             reminder_job_name, execution_job_name = self._schedule_system_occurrence_jobs(occ_id, today, schedule_time)
-                            self.db.execute(
-                                "UPDATE periodic_occurrences SET reminder_job_id = COALESCE(?, reminder_job_id), execution_job_id = ? WHERE id = ?",
-                                (reminder_job_name, execution_job_name, occ_id),
+                            self.occurrence_state.set_jobs(
+                                occ_id,
+                                reminder_job_id=reminder_job_name,
+                                execution_job_id=execution_job_name,
+                                commit=False,
                             )
                             db_commit()
                         except Exception as exc:

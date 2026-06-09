@@ -143,6 +143,60 @@ def test_monthly_cycle_canonicalization() -> None:
     reset_db_singleton(db_module)
 
 
+def test_remove_task_supports_old_occurrence_schema_without_execution_job_id() -> None:
+    db_path = make_case_dir("integration-remove-old-occ-schema") / "todo.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE periodic_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            cycle_type TEXT,
+            time_of_day TEXT,
+            is_active INTEGER,
+            count_current_month INTEGER,
+            task_kind TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE periodic_occurrences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            reminder_job_id TEXT,
+            scheduled_time TEXT,
+            scheduled_at TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO periodic_tasks (id, name, cycle_type, time_of_day, is_active, count_current_month, task_kind, created_at, updated_at) "
+        "VALUES (1, 'old schema task', 'daily', '09:00', 1, 0, 'scheduled', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )
+    conn.execute(
+        "INSERT INTO periodic_occurrences (id, task_id, date, status, reminder_job_id, scheduled_time, scheduled_at) "
+        "VALUES (1, 1, '2026-05-03', 'pending', 'reminder-old', '09:00', '2026-05-03T09:00:00+08:00')"
+    )
+    conn.commit()
+    conn.close()
+
+    paths_module.TODO_DB = db_path
+    db_module.TODO_DB = db_path
+    reset_db_singleton(db_module)
+
+    with mock.patch("core.integration_api.supports_system_scheduler", return_value=False):
+        assert remove_task(1, hard=False) is True
+
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute("SELECT is_active FROM periodic_tasks WHERE id = 1").fetchone()
+    conn.close()
+    assert row == (0,)
+
+    db_module.DB().close()
+    reset_db_singleton(db_module)
+
+
 def test_channel_flow() -> None:
     config_path = make_case_dir("integration-channel") / "chronos-config.json"
     original_config_path = os.environ.get("CHRONOS_CONFIG_PATH")
@@ -245,6 +299,31 @@ def test_remove_task_failure_keeps_db_state() -> None:
     reset_db_singleton(db_module)
 
 
+def test_remove_task_job_cleanup_uses_occurrence_state_store() -> None:
+    source = (PROJECT_ROOT / "core" / "integration_api.py").read_text()
+    remove_task_body = source.split("def remove_task", 1)[1].split("def list_channels", 1)[0]
+
+    assert "OccurrenceStateStore" in remove_task_body
+    assert "job_payloads_for_task(" in remove_task_body
+    assert "find_ids_with_jobs_for_task(" not in remove_task_body
+    assert "find_ids_with_jobs(" not in remove_task_body
+    assert "JOIN periodic_tasks" not in remove_task_body
+    assert "clear_jobs_for_ids(" in remove_task_body
+    assert "clear_jobs(" not in remove_task_body
+    assert "UPDATE periodic_occurrences SET reminder_job_id = NULL" not in remove_task_body
+
+
+def test_scheduled_job_removal_uses_shared_job_ref_iterator() -> None:
+    source = (PROJECT_ROOT / "core" / "integration_api.py").read_text()
+    helper_body = source.split("def _remove_scheduled_jobs", 1)[1].split("def _build_run_at", 1)[0]
+
+    assert "iter_job_refs(" in helper_body
+    assert "reminder_job_id =" not in helper_body
+    assert "execution_job_id =" not in helper_body
+    assert "row_payload.get(\"reminder_job_id\")" not in helper_body
+    assert "row_payload.get(\"execution_job_id\")" not in helper_body
+
+
 def test_remove_task_without_scheduler_still_updates_db() -> None:
     db_path = make_case_dir("integration-remove-no-scheduler") / "todo.db"
     prepare_temp_db(db_path)
@@ -308,5 +387,7 @@ if __name__ == "__main__":
     print("[ok] integration API channel flow")
     test_remove_task_failure_keeps_db_state()
     print("[ok] remove_task failure keeps DB state and records failed operation log")
+    test_remove_task_job_cleanup_uses_occurrence_state_store()
+    print("[ok] remove_task job cleanup uses occurrence state store")
     test_remove_task_without_scheduler_still_updates_db()
     print("[ok] remove_task degrades gracefully when scheduler is unavailable")

@@ -13,7 +13,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import subprocess
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -117,15 +119,77 @@ def notebooklm_ready() -> Tuple[bool, str]:
 
 
 def add_source(notebook_id: str, md_path: Path) -> Tuple[bool, str, str]:
+    """Add source with robust fallback.
+
+    Primary: upload markdown file path.
+    Fallback: retry via a restricted temporary markdown file with a simple title,
+    because some NotebookLM backends intermittently fail file registration with
+    "Failed to get SOURCE_ID from registration response" / RPC ADD_SOURCE.
+    """
+    # 1) Primary path: file upload
     cmd = ["notebooklm", "source", "add", str(md_path), "--type", "text", "-n", notebook_id, "--json"]
     p = subprocess.run(cmd, capture_output=True, text=True)
-    if p.returncode != 0:
-        return False, "", (p.stderr or p.stdout).strip()
+    if p.returncode == 0:
+        try:
+            obj = json.loads(p.stdout)
+            sid = str(obj.get("source_id", "") or "")
+            if not sid and isinstance(obj.get("source"), dict):
+                sid = str(obj["source"].get("id", "") or "")
+            if sid:
+                return True, sid, ""
+            return False, "", f"missing source id in response: {p.stdout[:300]}"
+        except Exception:
+            return False, "", f"invalid json: {p.stdout[:300]}"
+
+    primary_err = (p.stderr or p.stdout).strip()
+
+    # 2) Fallback path: retry through a restricted temp file with a simple title.
+    # Never pass rendered session content via argv: local process listings may expose it.
     try:
-        obj = json.loads(p.stdout)
-        return True, str(obj.get("source_id", "")), ""
+        text = md_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return False, "", f"file-read-failed: {e}; primary={primary_err}"
+
+    max_chars = 90000
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n\n[truncated by sync script due to size limit]"
+
+    title = md_path.stem[:120]
+    tmp_name = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", prefix="notebooklm-source-", delete=False) as tmp:
+            tmp_name = tmp.name
+            tmp.write(text)
+        os.chmod(tmp_name, stat.S_IRUSR | stat.S_IWUSR)
+        cmd2 = [
+            "notebooklm", "source", "add", tmp_name,
+            "--type", "text",
+            "--title", title,
+            "-n", notebook_id,
+            "--json",
+        ]
+        p2 = subprocess.run(cmd2, capture_output=True, text=True)
+    except Exception as exc:
+        return False, "", f"primary={primary_err}; fallback-exception={exc}"
+    finally:
+        if tmp_name:
+            try:
+                Path(tmp_name).unlink(missing_ok=True)
+            except Exception:
+                pass
+    if p2.returncode != 0:
+        return False, "", f"primary={primary_err}; fallback={(p2.stderr or p2.stdout).strip()}"
+
+    try:
+        obj2 = json.loads(p2.stdout)
+        sid2 = str(obj2.get("source_id", "") or "")
+        if not sid2 and isinstance(obj2.get("source"), dict):
+            sid2 = str(obj2["source"].get("id", "") or "")
+        if not sid2:
+            return False, "", f"fallback-missing-source-id: {p2.stdout[:300]}"
+        return True, sid2, ""
     except Exception:
-        return False, "", f"invalid json: {p.stdout[:300]}"
+        return False, "", f"fallback-invalid-json: {p2.stdout[:300]}"
 
 
 def main() -> int:

@@ -260,6 +260,285 @@ def test_today_mutation_ops() -> None:
     reset_db_singleton(db_module)
 
 
+def test_today_occurrence_update_completed_uses_state_transition_on_old_schema() -> None:
+    case_dir = make_case_dir("web-today-complete-state")
+    db_path = case_dir / "todo.db"
+    prepare_temp_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        INSERT INTO periodic_tasks
+        (id, name, category, cycle_type, time_of_day, timezone, is_active, count_current_month, task_kind, source, created_at, updated_at)
+        VALUES (1, 'web-complete', 'Inbox', 'daily', '09:00', 'Asia/Shanghai', 1, 0, 'scheduled', 'chronos', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO periodic_occurrences
+        (id, task_id, date, status, reminder_job_id, execution_job_id, scheduled_time, scheduled_at)
+        VALUES (41, 1, '2026-05-03', 'pending', 'reminder-41', 'execute-41', '09:00', '2026-05-03T09:00:00+08:00')
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    updated = handle_mutation(
+        "/api/v1/today/update",
+        {"identifier": "FIN-41", "patch": {"name": "web-complete-new", "status": "completed", "scheduled_time": "10:30"}},
+        db_path=db_path,
+    )
+    assert updated["identifier"] == "FIN-41"
+
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute(
+        """
+        SELECT t.name, o.status, o.scheduled_time, o.completed_at, o.completion_mode,
+               o.reminder_job_id, o.execution_job_id
+        FROM periodic_occurrences o
+        JOIN periodic_tasks t ON t.id = o.task_id
+        WHERE o.id = 41
+        """
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] == "web-complete-new"
+    assert row[1] == "completed"
+    assert row[2] == "10:30"
+    assert row[3] is not None
+    assert row[4] == "manual"
+    assert row[5] is None
+    assert row[6] is None
+
+
+def test_today_occurrence_update_skipped_records_web_metadata_when_columns_exist() -> None:
+    case_dir = make_case_dir("web-today-skip-state")
+    db_path = case_dir / "todo.db"
+    prepare_temp_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        ALTER TABLE periodic_occurrences ADD COLUMN completion_source TEXT;
+        ALTER TABLE periodic_occurrences ADD COLUMN trigger_label TEXT;
+        ALTER TABLE periodic_occurrences ADD COLUMN trigger_command TEXT;
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO periodic_tasks
+        (id, name, category, cycle_type, time_of_day, timezone, is_active, count_current_month, task_kind, source, created_at, updated_at)
+        VALUES (1, 'web-skip', 'Inbox', 'daily', '09:00', 'Asia/Shanghai', 1, 0, 'scheduled', 'chronos', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO periodic_occurrences
+        (id, task_id, date, status, reminder_job_id, execution_job_id, scheduled_time, scheduled_at)
+        VALUES (42, 1, '2026-05-03', 'reminded', 'reminder-42', 'execute-42', '09:00', '2026-05-03T09:00:00+08:00')
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    updated = handle_mutation(
+        "/api/v1/today/update",
+        {"identifier": "FIN-42", "patch": {"name": "web-skip-new", "status": "skipped", "scheduled_time": "10:45"}},
+        db_path=db_path,
+    )
+    assert updated["identifier"] == "FIN-42"
+
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute(
+        """
+        SELECT t.name, o.status, o.scheduled_time, o.completed_at, o.completion_mode,
+               o.completion_source, o.trigger_label, o.trigger_command,
+               o.reminder_job_id, o.execution_job_id
+        FROM periodic_occurrences o
+        JOIN periodic_tasks t ON t.id = o.task_id
+        WHERE o.id = 42
+        """
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] == "web-skip-new"
+    assert row[1] == "skipped"
+    assert row[2] == "10:45"
+    assert row[3] is not None
+    assert row[4] == "manual"
+    assert row[5] == "web_dashboard"
+    assert row[6] == "web_today_update"
+    assert row[7] == "web_dashboard today update"
+    assert row[8] is None
+    assert row[9] is None
+
+
+def test_today_occurrence_remove_supports_old_schema_without_execution_job_id() -> None:
+    case_dir = make_case_dir("web-today-remove-old-schema")
+    db_path = case_dir / "todo.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE periodic_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            category TEXT,
+            cycle_type TEXT,
+            time_of_day TEXT,
+            timezone TEXT,
+            is_active INTEGER,
+            count_current_month INTEGER,
+            task_kind TEXT,
+            source TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE periodic_occurrences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            reminder_job_id TEXT,
+            scheduled_time TEXT,
+            scheduled_at TEXT
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO periodic_tasks
+        (id, name, category, cycle_type, time_of_day, timezone, is_active, count_current_month, task_kind, source, created_at, updated_at)
+        VALUES (1, 'old-remove', 'Inbox', 'daily', '09:00', 'Asia/Shanghai', 1, 0, 'scheduled', 'chronos', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO periodic_occurrences
+        (id, task_id, date, status, reminder_job_id, scheduled_time, scheduled_at)
+        VALUES (51, 1, '2026-05-03', 'pending', 'reminder-51', '09:00', '2026-05-03T09:00:00+08:00')
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    removed = handle_mutation("/api/v1/today/remove", {"identifier": "FIN-51"}, db_path=db_path)
+    assert removed["identifier"] == "FIN-51"
+
+    conn = sqlite3.connect(str(db_path))
+    assert conn.execute("SELECT 1 FROM periodic_occurrences WHERE id = 51").fetchone() is None
+    conn.close()
+
+
+def test_today_occurrence_update_to_reminded_clears_stale_jobs() -> None:
+    case_dir = make_case_dir("web-today-reminded-clears-jobs")
+    db_path = case_dir / "todo.db"
+    prepare_temp_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        INSERT INTO periodic_tasks
+        (id, name, category, cycle_type, time_of_day, timezone, is_active, count_current_month, task_kind, source, created_at, updated_at)
+        VALUES (1, 'web-reminded', 'Inbox', 'daily', '09:00', 'Asia/Shanghai', 1, 0, 'scheduled', 'chronos', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO periodic_occurrences
+        (id, task_id, date, status, reminder_job_id, execution_job_id, scheduled_time, scheduled_at)
+        VALUES (52, 1, '2026-05-03', 'in_progress', 'reminder-52', 'execute-52', '09:00', '2026-05-03T09:00:00+08:00')
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    updated = handle_mutation(
+        "/api/v1/today/update",
+        {"identifier": "FIN-52", "patch": {"name": "web-reminded-new", "status": "reminded", "scheduled_time": "10:20"}},
+        db_path=db_path,
+    )
+    assert updated["identifier"] == "FIN-52"
+
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute(
+        "SELECT t.name, o.status, o.scheduled_time, o.reminder_job_id, o.execution_job_id "
+        "FROM periodic_occurrences o JOIN periodic_tasks t ON t.id = o.task_id WHERE o.id = 52"
+    ).fetchone()
+    conn.close()
+
+    assert row == ("web-reminded-new", "reminded", "10:20", None, None)
+
+
+def test_today_occurrence_update_supports_old_schema_without_execution_job_id() -> None:
+    case_dir = make_case_dir("web-today-update-old-schema")
+    db_path = case_dir / "todo.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE periodic_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            category TEXT,
+            cycle_type TEXT,
+            time_of_day TEXT,
+            timezone TEXT,
+            is_active INTEGER,
+            count_current_month INTEGER,
+            task_kind TEXT,
+            source TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE periodic_occurrences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            reminder_job_id TEXT,
+            scheduled_time TEXT,
+            scheduled_at TEXT
+        );
+        INSERT INTO periodic_tasks
+        (id, name, category, cycle_type, time_of_day, timezone, is_active, count_current_month, task_kind, source, created_at, updated_at)
+        VALUES (1, 'old-update', 'Inbox', 'daily', '09:00', 'Asia/Shanghai', 1, 0, 'scheduled', 'chronos', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+        INSERT INTO periodic_occurrences
+        (id, task_id, date, status, reminder_job_id, scheduled_time, scheduled_at)
+        VALUES (53, 1, '2026-05-03', 'pending', 'reminder-53', '09:00', '2026-05-03T09:00:00+08:00');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    updated = handle_mutation(
+        "/api/v1/today/update",
+        {"identifier": "FIN-53", "patch": {"name": "old-update-new", "status": "reminded", "scheduled_time": "10:30"}},
+        db_path=db_path,
+    )
+    assert updated["identifier"] == "FIN-53"
+
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute(
+        "SELECT t.name, o.status, o.scheduled_time, o.reminder_job_id "
+        "FROM periodic_occurrences o JOIN periodic_tasks t ON t.id = o.task_id WHERE o.id = 53"
+    ).fetchone()
+    conn.close()
+    assert row == ("old-update-new", "reminded", "10:30", None)
+
+
+def test_web_today_job_removal_uses_shared_job_ref_iterator() -> None:
+    source = (PROJECT_ROOT / "scripts" / "web_dashboard.py").read_text()
+    helper_body = source.split("def _remove_scheduler_jobs_for_payload", 1)[1].split("def update_today_task", 1)[0]
+    update_body = source.split("def update_today_task", 1)[1].split("def remove_today_task", 1)[0]
+    remove_body = source.split("def remove_today_task", 1)[1].split("def handle_mutation", 1)[0]
+    combined = update_body + remove_body
+
+    assert "iter_job_refs(" in helper_body
+    assert "_remove_scheduler_jobs_for_pair(" in combined
+    assert "update_non_terminal(" in update_body
+    assert "reminder_job_id = row" not in combined
+    assert "execution_job_id = row" not in combined
+    assert "reminder_job_id, execution_job_id =" not in combined
+    assert "if reminder_job_id" not in combined
+    assert "if execution_job_id" not in combined
+
+
 def test_read_only_server_rejects_mutation() -> None:
     case_dir = make_case_dir("web-read-only")
     db_path = case_dir / "todo.db"

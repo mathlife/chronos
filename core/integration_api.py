@@ -10,6 +10,7 @@ from typing import Any
 from .config import get_raw_config, remove_channel, set_channels, upsert_channel
 from .db import DB, clear_task_cache, db_commit
 from .models import ALLOWED_CYCLE_TYPES
+from .occurrence_state import OccurrenceStateStore, iter_job_refs
 from .paths import PYTHON_BIN, SCRIPTS_DIR
 from .system_command_runner import build_handler_payload_from_legacy_command
 from .system_scheduler import build_job_command, create_once_job, remove_job, supports_system_scheduler
@@ -241,24 +242,14 @@ def _remove_scheduled_jobs(rows: list[dict]) -> tuple[list[dict], list[str]]:
     scheduler_available = supports_system_scheduler()
     for row in rows:
         row_payload = dict(row)
-        reminder_job_id = row_payload.get("reminder_job_id")
-        execution_job_id = row_payload.get("execution_job_id")
-        if reminder_job_id:
+        for kind, job_name in iter_job_refs(row_payload):
             if not scheduler_available:
-                warnings.append(f"skipped removing reminder job {reminder_job_id}: scheduler unavailable")
-            else:
-                ok = remove_job(str(reminder_job_id))
-                if not ok:
-                    raise RuntimeError(f"failed to remove reminder job {reminder_job_id}")
-                removed.append({"kind": "reminder", "job_name": str(reminder_job_id), "row": row_payload})
-        if execution_job_id:
-            if not scheduler_available:
-                warnings.append(f"skipped removing execution job {execution_job_id}: scheduler unavailable")
-            else:
-                ok = remove_job(str(execution_job_id))
-                if not ok:
-                    raise RuntimeError(f"failed to remove execution job {execution_job_id}")
-                removed.append({"kind": "execution", "job_name": str(execution_job_id), "row": row_payload})
+                warnings.append(f"skipped removing {kind} job {job_name}: scheduler unavailable")
+                continue
+            ok = remove_job(job_name)
+            if not ok:
+                raise RuntimeError(f"failed to remove {kind} job {job_name}")
+            removed.append({"kind": kind, "job_name": job_name, "row": row_payload})
     return removed, warnings
 
 
@@ -439,22 +430,9 @@ def remove_task(task_id: int, *, hard: bool = False) -> bool:
     db = DB()
     operation_id = uuid.uuid4().hex
 
-    rows = db.execute(
-        """
-        SELECT
-            o.id AS occurrence_id,
-            o.date,
-            o.scheduled_time,
-            o.reminder_job_id,
-            o.execution_job_id,
-            t.time_of_day
-        FROM periodic_occurrences o
-        JOIN periodic_tasks t ON t.id = o.task_id
-        WHERE task_id = ? AND (reminder_job_id IS NOT NULL OR execution_job_id IS NOT NULL)
-        """,
-        (task_id,),
-    ).fetchall()
-    row_payloads = [_normalize_row_dict(row) for row in rows]
+    occurrence_state = OccurrenceStateStore(db)
+    row_payloads = occurrence_state.job_payloads_for_task(task_id)
+    occurrence_ids = [int(row["occurrence_id"]) for row in row_payloads]
     operation_payload = {
         "hard": bool(hard),
         "job_count": len(row_payloads),
@@ -481,18 +459,12 @@ def remove_task(task_id: int, *, hard: bool = False) -> bool:
 
         _begin_immediate(db)
         try:
-            if hard:
-                db.execute(
-                    "UPDATE periodic_occurrences SET reminder_job_id = NULL, execution_job_id = NULL WHERE task_id = ?",
-                    (task_id,),
-                )
-            else:
+            occurrence_state.clear_jobs_for_ids(occurrence_ids, commit=False)
+            if not hard:
                 db.execute(
                     """
                     UPDATE periodic_occurrences
-                    SET reminder_job_id = NULL,
-                        execution_job_id = NULL,
-                        status = CASE WHEN status IN ('pending', 'reminded') THEN 'skipped' ELSE status END
+                    SET status = CASE WHEN status IN ('pending', 'reminded') THEN 'skipped' ELSE status END
                     WHERE task_id = ?
                     """,
                     (task_id,),

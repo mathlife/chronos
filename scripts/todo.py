@@ -33,6 +33,7 @@ from core.models import ALLOWED_CYCLE_TYPES
 from core.scheduler import resolve_monthly_quota_window
 from core.system_command_runner import execute_system_handler
 from core.system_scheduler import remove_job
+from core.occurrence_state import OccurrenceStateStore, iter_job_refs, iter_job_refs_from_pair
 from scripts.todo_nl import parse_natural_language
 try:
     from scripts.subagent_sync_ledger import looks_like_subagent_session
@@ -571,9 +572,11 @@ def complete_periodic_occurrence(
     conn = sqlite3.connect(str(TODO_DB))
     try:
         cur = conn.cursor()
+        occurrence_columns = {info[1] for info in cur.execute("PRAGMA table_info(periodic_occurrences)").fetchall()}
+        execution_expr = "o.execution_job_id" if "execution_job_id" in occurrence_columns else "NULL"
         cur.execute(
-            """
-            SELECT o.task_id, o.status, COALESCE(t.task_kind, 'scheduled'), o.date, o.reminder_job_id, o.execution_job_id
+            f"""
+            SELECT o.task_id, o.status, COALESCE(t.task_kind, 'scheduled'), o.date, o.reminder_job_id, {execution_expr}
             FROM periodic_occurrences o
             JOIN periodic_tasks t ON o.task_id = t.id
             WHERE o.id = ?
@@ -593,32 +596,21 @@ def complete_periodic_occurrence(
         if completion_source != 'manual_cli' and task_kind != 'system' and not allow_auto_for_scheduled:
             return False, f"❌ 自动路径拒绝处理非 system 任务 FIN-{occ_id} (task_kind={task_kind})"
 
-        occurrence_columns = {info[1] for info in cur.execute("PRAGMA table_info(periodic_occurrences)").fetchall()}
-        extra_assignments = []
-        extra_params: list[str | None] = []
-        if 'completion_source' in occurrence_columns:
-            extra_assignments.append("completion_source = ?")
-            extra_params.append(completion_source)
-        if 'trigger_label' in occurrence_columns:
-            extra_assignments.append("trigger_label = COALESCE(?, trigger_label)")
-            extra_params.append(trigger_label)
-        if 'trigger_command' in occurrence_columns:
-            extra_assignments.append("trigger_command = COALESCE(?, trigger_command)")
-            extra_params.append(trigger_command)
+        state_store = OccurrenceStateStore(conn)
+        changed = state_store.complete(
+            occ_id,
+            completion_mode=completion_mode,
+            special_handler_result=special_handler_result,
+            completion_source=completion_source,
+            trigger_label=trigger_label,
+            trigger_command=trigger_command,
+            commit=False,
+        )
+        if not changed:
+            return False, f"❌ 无法完成 FIN-{occ_id}"
 
-        update_sql = """
-            UPDATE periodic_occurrences
-            SET status = 'completed', completed_at = CURRENT_TIMESTAMP,
-                completion_mode = ?, special_handler_result = COALESCE(?, special_handler_result)
-        """
-        if extra_assignments:
-            update_sql += ",\n                " + ",\n                ".join(extra_assignments)
-        update_sql += "\n            WHERE id = ?\n            "
-        cur.execute(update_sql, (completion_mode, special_handler_result, *extra_params, occ_id))
-        remove_job(reminder_job_id)
-        remove_job(execution_job_id)
-        if reminder_job_id or execution_job_id:
-            cur.execute("UPDATE periodic_occurrences SET reminder_job_id = NULL, execution_job_id = NULL WHERE id = ?", (occ_id,))
+        for _kind, scheduler_job_name in iter_job_refs_from_pair(reminder_job_id, execution_job_id):
+            remove_job(scheduler_job_name)
         task_columns = {row[1] for row in cur.execute("PRAGMA table_info(periodic_tasks)").fetchall()}
         select_columns = ['cycle_type']
         if 'n_per_month' in task_columns:
@@ -679,29 +671,15 @@ def complete_periodic_occurrence(
                           AND date >= ? AND date <= ?
                     """
                     cur.execute(quota_sql, (task_id, win_start.isoformat(), win_end.isoformat()))
-                    cur.execute(
-                        """
-                        SELECT reminder_job_id, execution_job_id, COALESCE(t.task_kind, 'scheduled')
-                        FROM periodic_occurrences o
-                        JOIN periodic_tasks t ON t.id = o.task_id
-                        WHERE o.task_id = ? AND o.status = 'completed'
-                          AND o.date >= ? AND o.date <= ?
-                          AND (o.reminder_job_id IS NOT NULL OR o.execution_job_id IS NOT NULL)
-                        """,
-                        (task_id, win_start.isoformat(), win_end.isoformat()),
+                    quota_occurrence_ids = state_store.find_completed_ids_with_jobs_in_date_window(
+                        task_id,
+                        win_start.isoformat(),
+                        win_end.isoformat(),
                     )
-                    for quota_reminder_job_id, quota_execution_job_id, quota_task_kind in cur.fetchall():
-                        remove_job(quota_reminder_job_id)
-                        remove_job(quota_execution_job_id)
-                    cur.execute(
-                        """
-                        UPDATE periodic_occurrences
-                        SET reminder_job_id = NULL, execution_job_id = NULL
-                        WHERE task_id = ? AND status = 'completed'
-                          AND date >= ? AND date <= ?
-                        """,
-                        (task_id, win_start.isoformat(), win_end.isoformat()),
-                    )
+                    quota_job_refs = state_store.clear_jobs_for_ids(quota_occurrence_ids, commit=False)
+                    for reminder_ref, execution_ref in quota_job_refs:
+                        for _kind, job_name in iter_job_refs_from_pair(reminder_ref, execution_ref):
+                            remove_job(job_name)
 
         conn.commit()
     finally:
@@ -1059,30 +1037,36 @@ def cmd_skip(identifier):
                 conn.close()
                 return
 
-            cur.execute("SELECT status, reminder_job_id, execution_job_id FROM periodic_occurrences WHERE id = ?", (occ_id,))
+            occurrence_columns = {info[1] for info in cur.execute("PRAGMA table_info(periodic_occurrences)").fetchall()}
+            if "execution_job_id" in occurrence_columns:
+                cur.execute("SELECT status, reminder_job_id, execution_job_id FROM periodic_occurrences WHERE id = ?", (occ_id,))
+            else:
+                cur.execute("SELECT status, reminder_job_id, NULL FROM periodic_occurrences WHERE id = ?", (occ_id,))
             current_status, job_name, execution_job_id = cur.fetchone()
             if current_status == 'skipped':
                 print(f"⚠️  FIN-{occ_id} 已经是跳过状态")
                 conn.close()
                 return
 
-            cur.execute(
-                "UPDATE periodic_occurrences SET status = 'skipped', completion_source = COALESCE(completion_source, 'manual_cli'), trigger_label = COALESCE(trigger_label, 'manual_skip'), trigger_command = COALESCE(trigger_command, 'todo.py skip') WHERE id = ?",
-                (occ_id,),
+            state_store = OccurrenceStateStore(conn)
+            changed = state_store.skip(
+                occ_id,
+                completion_mode='manual',
+                completion_source='manual_cli',
+                trigger_label='manual_skip',
+                trigger_command='todo.py skip',
+                commit=False,
             )
+            if not changed:
+                print(f"⚠️  FIN-{occ_id} 已经是终止状态")
+                conn.close()
+                return
 
-            if job_name:
+            for _kind, scheduler_job_name in iter_job_refs_from_pair(job_name, execution_job_id):
                 try:
-                    remove_job(job_name)
+                    remove_job(scheduler_job_name)
                 except Exception:
                     pass
-            if execution_job_id:
-                try:
-                    remove_job(execution_job_id)
-                except Exception:
-                    pass
-            if job_name or execution_job_id:
-                cur.execute("UPDATE periodic_occurrences SET reminder_job_id = NULL, execution_job_id = NULL WHERE id = ?", (occ_id,))
 
             conn.commit()
             conn.close()
