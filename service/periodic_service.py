@@ -515,6 +515,11 @@ class PeriodicTaskManager:
             if not scheduler.should_remind_today():
                 continue
 
+            # 配额检查：仅当本月已完成的次数未达到配额上限时才生成提醒。
+            # _monthly_quota_reached 已经基于已完成的记录计数，实现 "仅在完成时扣配额" 的需求。
+            if self._monthly_quota_reached(task, today):
+                continue
+
             schedule_times = scheduler.get_hourly_schedule_for_day(today) if task.cycle_type == 'hourly' else [task.time_of_day]
             for schedule_time in schedule_times:
                 if not schedule_time:

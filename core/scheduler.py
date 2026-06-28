@@ -43,6 +43,12 @@ def _month_last_day(target: date) -> date:
     return date(target.year, target.month, days)
 
 
+def _clamped_month_day(year: int, month: int, day: int) -> date:
+    """Return a date in the month, treating day 31 as month-end for short months."""
+    max_day = calendar.monthrange(year, month)[1]
+    return date(year, month, min(day, max_day))
+
+
 def resolve_monthly_quota_window(
     *,
     cycle_type: str,
@@ -67,20 +73,21 @@ def resolve_monthly_quota_window(
 
     if range_start <= range_end:
         try:
-            return date(year, month, range_start), date(year, month, range_end)
+            return _clamped_month_day(year, month, range_start), _clamped_month_day(year, month, range_end)
         except ValueError:
             return None
 
     try:
-        if target_day.day >= range_start:
-            start = date(year, month, range_start)
+        current_month_last_day = calendar.monthrange(year, month)[1]
+        if target_day.day >= min(range_start, current_month_last_day):
+            start = _clamped_month_day(year, month, range_start)
             ny, nm = _month_add(year, month, 1)
-            end = date(ny, nm, range_end)
+            end = _clamped_month_day(ny, nm, range_end)
             return start, end
-        if target_day.day <= range_end:
+        if target_day.day <= min(range_end, current_month_last_day):
             py, pm = _month_add(year, month, -1)
-            start = date(py, pm, range_start)
-            end = date(year, month, range_end)
+            start = _clamped_month_day(py, pm, range_start)
+            end = _clamped_month_day(year, month, range_end)
             return start, end
     except ValueError:
         return None
@@ -251,11 +258,11 @@ class TaskScheduler:
         month = today.month
 
         try:
-            interval1_start = date(year, month, start)
+            interval1_start = _clamped_month_day(year, month, start)
             if month == 12:
-                interval1_end = date(year + 1, 1, end)
+                interval1_end = _clamped_month_day(year + 1, 1, end)
             else:
-                interval1_end = date(year, month + 1, end)
+                interval1_end = _clamped_month_day(year, month + 1, end)
             if interval1_start <= today <= interval1_end:
                 return True
         except ValueError:
@@ -263,10 +270,10 @@ class TaskScheduler:
 
         try:
             if month == 1:
-                interval2_start = date(year - 1, 12, start)
+                interval2_start = _clamped_month_day(year - 1, 12, start)
             else:
-                interval2_start = date(year, month - 1, start)
-            interval2_end = date(year, month, end)
+                interval2_start = _clamped_month_day(year, month - 1, start)
+            interval2_end = _clamped_month_day(year, month, end)
             if interval2_start <= today <= interval2_end:
                 return True
         except ValueError:

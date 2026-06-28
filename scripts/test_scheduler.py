@@ -48,8 +48,39 @@ def test_monthly_range_cross_month_membership() -> None:
     assert TaskScheduler(task, date(2026, 6, 4)).should_remind_today() is False
 
 
+def test_full_month_range_clamps_to_short_month_end() -> None:
+    feb_window = resolve_monthly_quota_window(
+        cycle_type="monthly_range",
+        target_day=date(2026, 2, 28),
+        range_start=1,
+        range_end=31,
+    )
+    assert feb_window == (date(2026, 2, 1), date(2026, 2, 28))
+
+    april_window = resolve_monthly_quota_window(
+        cycle_type="monthly_range",
+        target_day=date(2026, 4, 30),
+        range_start=1,
+        range_end=31,
+    )
+    assert april_window == (date(2026, 4, 1), date(2026, 4, 30))
+
+    task = PeriodicTask(
+        id=2,
+        name="full-month",
+        cycle_type="monthly_range",
+        range_start=1,
+        range_end=31,
+        n_per_month=1,
+    )
+    assert TaskScheduler(task, date(2026, 2, 28)).should_remind_today() is True
+    assert TaskScheduler(task, date(2026, 4, 30)).should_remind_today() is True
+
+
 if __name__ == "__main__":
     test_cross_month_quota_window()
     print("[ok] resolve_monthly_quota_window handles cross-month range")
     test_monthly_range_cross_month_membership()
     print("[ok] TaskScheduler monthly_range supports cross-month windows")
+    test_full_month_range_clamps_to_short_month_end()
+    print("[ok] monthly_range full-month windows clamp to short month ends")

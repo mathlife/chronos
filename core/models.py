@@ -26,6 +26,7 @@ class PeriodicTask:
     range_start: Optional[int] = None
     range_end: Optional[int] = None
     n_per_month: Optional[int] = None
+    quota: Optional[int] = None
     interval_hours: Optional[int] = None
     time_of_day: Optional[str] = '09:00'  # HH:MM; for hourly this is the anchor slot in each day
     event_time: Optional[str] = None
