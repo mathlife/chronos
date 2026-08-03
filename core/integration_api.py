@@ -19,6 +19,12 @@ from .timezones import get_shanghai_tz
 _TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
 SHANGHAI_TZ = get_shanghai_tz()
 
+
+class SchedulerJobRemovalError(RuntimeError):
+    def __init__(self, message: str, *, removed_jobs: list[dict]):
+        super().__init__(message)
+        self.removed_jobs = removed_jobs
+
 TASK_MUTABLE_FIELDS = {
     "quota",
 
@@ -99,6 +105,11 @@ def _normalize_task_payload(payload: dict, *, partial: bool) -> dict:
         raise ValueError(f"unknown task fields: {', '.join(unknown)}")
 
     normalized = dict(payload)
+    if "quota" in normalized:
+        quota = normalized.pop("quota")
+        if "n_per_month" in normalized and normalized["n_per_month"] != quota:
+            raise ValueError("quota and n_per_month must match when both are provided")
+        normalized["n_per_month"] = quota
     if "cycle_type" in normalized:
         cycle_type = str(normalized.get("cycle_type") or "").strip()
         if cycle_type not in ALLOWED_CYCLE_TYPES:
@@ -197,6 +208,8 @@ def _validate_cycle_requirements(task_data: dict) -> None:
         raise ValueError("monthly_n_times tasks require n_per_month")
     if cycle_type == "monthly_dates" and not task_data.get("dates_list"):
         raise ValueError("monthly_dates tasks require dates_list")
+    if task_data.get("special_handler") == "run_command" and task_data.get("task_kind") != "system":
+        raise ValueError("run_command requires task_kind=system")
 
 
 def _begin_immediate(db: DB) -> None:
@@ -250,7 +263,10 @@ def _remove_scheduled_jobs(rows: list[dict]) -> tuple[list[dict], list[str]]:
                 continue
             ok = remove_job(job_name)
             if not ok:
-                raise RuntimeError(f"failed to remove {kind} job {job_name}")
+                raise SchedulerJobRemovalError(
+                    f"failed to remove {kind} job {job_name}",
+                    removed_jobs=removed,
+                )
             removed.append({"kind": kind, "job_name": job_name, "row": row_payload})
     return removed, warnings
 
@@ -317,20 +333,20 @@ def get_task(task_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-def _sync_today_occurrences_after_create() -> None:
+def _sync_today_schedule() -> str | None:
     try:
         from service.periodic_service import PeriodicTaskManager
-    except Exception:
-        return
+    except Exception as exc:
+        return str(exc)
 
     manager = PeriodicTaskManager()
     try:
-        manager.ensure_today_occurrences()
-    except Exception:
-        # Keep task creation successful even if same-day occurrence sync fails.
-        return
+        manager.generate_reminders_for_today()
+    except Exception as exc:
+        return str(exc)
     finally:
         manager.db.close()
+    return None
 
 
 def create_task(payload: dict) -> dict:
@@ -387,7 +403,9 @@ def create_task(payload: dict) -> dict:
     created = get_task(cur.lastrowid)
     if not created:
         raise RuntimeError("failed to load created task")
-    _sync_today_occurrences_after_create()
+    scheduler_warning = _sync_today_schedule()
+    if scheduler_warning:
+        created["scheduler_warning"] = scheduler_warning
     return created
 
 
@@ -406,22 +424,118 @@ def update_task(task_id: int, patch: dict) -> dict:
     if "time_of_day" in normalized_patch and "event_time" not in normalized_patch:
         normalized_patch["event_time"] = normalized_patch.get("time_of_day")
 
-    assignments: list[str] = []
-    params: list[Any] = []
-    for key, value in normalized_patch.items():
-        assignments.append(f"{key} = ?")
-        params.append(value)
-    assignments.append("updated_at = CURRENT_TIMESTAMP")
-    params.append(task_id)
-    DB().execute(
-        f"UPDATE periodic_tasks SET {', '.join(assignments)} WHERE id = ?",
-        tuple(params),
-    )
-    db_commit()
+    db = DB()
+    occurrence_state = OccurrenceStateStore(db)
+    row_payloads = occurrence_state.job_payloads_for_task(task_id)
+    active_rows = db.execute(
+        "SELECT id FROM periodic_occurrences WHERE task_id = ? AND status IN ('pending', 'reminded')",
+        (task_id,),
+    ).fetchall()
+    active_occurrence_ids = [int(row[0]) for row in active_rows]
+    operation_id = uuid.uuid4().hex
+    operation_payload = {
+        "task_before": current,
+        "task_patch": normalized_patch,
+        "active_occurrence_ids": active_occurrence_ids,
+        "jobs": row_payloads,
+    }
+
+    _begin_immediate(db)
+    try:
+        _record_scheduler_operation(
+            db,
+            operation_id=operation_id,
+            task_id=task_id,
+            operation="update_task",
+            payload=operation_payload,
+        )
+        db_commit()
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+
+    removed_jobs: list[dict] = []
+    try:
+        removed_jobs, removal_warnings = _remove_scheduled_jobs(row_payloads)
+
+        assignments: list[str] = []
+        params: list[Any] = []
+        for key, value in normalized_patch.items():
+            assignments.append(f"{key} = ?")
+            params.append(value)
+        assignments.append("updated_at = CURRENT_TIMESTAMP")
+        params.append(task_id)
+
+        _begin_immediate(db)
+        try:
+            db.execute(
+                "DELETE FROM periodic_occurrences WHERE task_id = ? AND status IN ('pending', 'reminded')",
+                (task_id,),
+            )
+            db.execute(
+                f"UPDATE periodic_tasks SET {', '.join(assignments)} WHERE id = ?",
+                tuple(params),
+            )
+            warning_text = "; ".join(removal_warnings) if removal_warnings else None
+            _update_scheduler_operation(
+                db,
+                operation_id=operation_id,
+                status="applied_with_warning" if warning_text else "applied",
+                error=warning_text,
+            )
+            db_commit()
+        except Exception as exc:
+            db.execute("ROLLBACK")
+            raise RuntimeError(f"failed to update task state: {exc}") from exc
+    except Exception as exc:
+        if isinstance(exc, SchedulerJobRemovalError):
+            removed_jobs = exc.removed_jobs
+        compensation_errors = _recreate_removed_jobs(removed_jobs)
+        error_message = str(exc)
+        if compensation_errors:
+            error_message = f"{error_message}; compensation_failed={'; '.join(compensation_errors)}"
+        _begin_immediate(db)
+        try:
+            _update_scheduler_operation(
+                db,
+                operation_id=operation_id,
+                status="failed",
+                error=error_message,
+                bump_attempt=True,
+            )
+            db_commit()
+        except Exception:
+            db.execute("ROLLBACK")
+        raise RuntimeError(error_message) from exc
+
     clear_task_cache()
     updated = get_task(task_id)
     if not updated:
         raise RuntimeError(f"task {task_id} not found after update")
+    scheduler_warning: str | None = None
+    try:
+        from service.periodic_service import PeriodicTaskManager
+
+        manager = PeriodicTaskManager()
+        try:
+            manager.generate_reminders_for_today()
+        finally:
+            manager.db.close()
+    except Exception as exc:
+        scheduler_warning = str(exc)
+        _begin_immediate(db)
+        try:
+            _update_scheduler_operation(
+                db,
+                operation_id=operation_id,
+                status="applied_with_warning",
+                error=f"task updated but occurrence resync failed: {exc}",
+            )
+            db_commit()
+        except Exception:
+            db.execute("ROLLBACK")
+    if scheduler_warning:
+        updated["scheduler_warning"] = scheduler_warning
     return updated
 
 
@@ -585,6 +699,8 @@ def remove_task(task_id: int, *, hard: bool = False) -> bool:
             db.execute("ROLLBACK")
             raise RuntimeError(f"failed to update database state: {exc}") from exc
     except Exception as exc:
+        if isinstance(exc, SchedulerJobRemovalError):
+            removed_jobs = exc.removed_jobs
         compensation_errors = _recreate_removed_jobs(removed_jobs)
         error_message = str(exc)
         if compensation_errors:

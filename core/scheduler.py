@@ -61,7 +61,7 @@ def resolve_monthly_quota_window(
     - monthly_n_times: natural month window
     - monthly_range: configured range window (supports cross-month when start > end)
     """
-    if cycle_type == "monthly_n_times":
+    if cycle_type in ("monthly_n_times", "monthly_dates"):
         return _month_first_day(target_day), _month_last_day(target_day)
     if cycle_type != "monthly_range":
         return None
@@ -351,7 +351,7 @@ class TaskScheduler:
         done_dates = {d for d, s in existing_occurrences if s in ('completed', 'skipped')}
         pending_dates = [d for d in all_dates if d not in done_dates]
 
-        if self.task.cycle_type in ('monthly_n_times', 'monthly_range') and (self.task.n_per_month or 0) > 0:
+        if self.task.cycle_type in ('monthly_n_times', 'monthly_range', 'monthly_dates') and (self.task.n_per_month or 0) > 0:
             count_current = self.task.count_current_month
             n = self.task.n_per_month or 0
             allowed = max(0, n - count_current)

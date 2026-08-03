@@ -95,7 +95,7 @@ class PeriodicTaskManager:
             quota = int(n_per_month) if n_per_month is not None else 0
         except (TypeError, ValueError):
             quota = 0
-        return cycle_type in ("monthly_n_times", "monthly_range") and quota > 0
+        return cycle_type in ("monthly_n_times", "monthly_range", "monthly_dates") and quota > 0
 
     @staticmethod
     def _quota_window_for_day(task_row: dict | sqlite3.Row | tuple, target_day: date) -> tuple[date, date] | None:  # type: ignore[name-defined]
@@ -310,7 +310,7 @@ class PeriodicTaskManager:
             if cycle_type_row:
                 # Increment quota counter for tasks that have a per‑month limit (monthly_n_times or monthly_dates with n_per_month)
                 cycle_type = cycle_type_row[0]
-                n_per_month = cycle_type_row[2]
+                n_per_month = cycle_type_row[1]
                 if (cycle_type == 'monthly_n_times') or (cycle_type == 'monthly_dates' and n_per_month):
                     self.db.execute("UPDATE periodic_tasks SET count_current_month = count_current_month + 1 WHERE id = ?", (task_id,))
             occ_row = self.db.execute("SELECT date FROM periodic_occurrences WHERE id = ?", (occurrence_id,)).fetchone()

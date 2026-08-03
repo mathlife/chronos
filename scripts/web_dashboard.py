@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.config import get_raw_config, inspect_config, save_raw_config
+from core.config import inspect_config, update_raw_config
 from core.integration_api import create_task, delete_channel, put_channel, remove_task, update_task
 from core.observability import METRICS, emit_log
 from core.occurrence_state import OccurrenceStateStore, iter_job_refs, iter_job_refs_from_pair
@@ -1546,12 +1546,10 @@ def handle_mutation(path: str, payload: dict, *, db_path: Path | None = None) ->
         return {"id": channel_id}
     if normalized_path == "/api/v1/settings/update":
         chat_id = str(payload.get("chat_id") or "").strip()
-        raw = get_raw_config()
         if chat_id:
-            raw["chat_id"] = chat_id
+            update_raw_config(updates={"chat_id": chat_id})
         else:
-            raw.pop("chat_id", None)
-        save_raw_config(raw)
+            update_raw_config(remove_keys=("chat_id",))
         return {"chat_id": chat_id or None}
     if normalized_path == "/api/v1/today/update":
         identifier = str(payload.get("identifier") or "").strip()

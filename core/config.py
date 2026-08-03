@@ -1,9 +1,18 @@
 """Configuration module for Chronos skill."""
 import json
 import os
+import tempfile
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from .paths import CONFIG_DIR
+
+_CONFIG_WRITE_LOCK = threading.RLock()
+try:
+    import fcntl  # type: ignore
+except ImportError:  # pragma: no cover - non-posix
+    fcntl = None
 
 
 def get_config_path() -> Path:
@@ -25,11 +34,40 @@ def _load_config_file(config_path: Path) -> tuple[dict, str | None]:
         return {}, f"Failed to read chronos config: {exc}"
 
 
-def _write_config_file(config_path: Path, data: dict) -> None:
+@contextmanager
+def _config_write_lock(config_path: Path):
+    with _CONFIG_WRITE_LOCK:
+        if fcntl is None:
+            yield
+            return
+        lock_path = config_path.with_name(config_path.name + ".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _write_config_file_unlocked(config_path: Path, data: dict) -> None:
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.write("\n")
+    fd, temp_name = tempfile.mkstemp(prefix=f".{config_path.name}.", dir=str(config_path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_name, config_path)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+def _write_config_file(config_path: Path, data: dict) -> None:
+    with _config_write_lock(config_path):
+        _write_config_file_unlocked(config_path, data)
 
 
 def inspect_config() -> dict:
@@ -96,6 +134,20 @@ def save_raw_config(config: dict) -> dict:
     return config
 
 
+def update_raw_config(*, updates: dict | None = None, remove_keys: tuple[str, ...] = ()) -> dict:
+    """Atomically patch top-level config keys without losing concurrent updates."""
+    updates = dict(updates or {})
+    config_path = get_config_path()
+    with _config_write_lock(config_path):
+        raw, _error = _load_config_file(config_path)
+        raw = dict(raw) if isinstance(raw, dict) else {}
+        raw.update(updates)
+        for key in remove_keys:
+            raw.pop(key, None)
+        _write_config_file_unlocked(config_path, raw)
+        return raw
+
+
 def validate_config() -> dict:
     """Return config diagnostics and raise when config is invalid."""
     info = inspect_config()
@@ -139,9 +191,12 @@ def set_channels(channels: list[dict]) -> list[dict]:
     if not isinstance(channels, list):
         raise ValueError("channels must be a list")
     normalized = [dict(c) for c in channels if isinstance(c, dict)]
-    raw = get_raw_config()
-    raw["channels"] = normalized
-    save_raw_config(raw)
+    config_path = get_config_path()
+    with _config_write_lock(config_path):
+        raw, _error = _load_config_file(config_path)
+        raw = dict(raw) if isinstance(raw, dict) else {}
+        raw["channels"] = normalized
+        _write_config_file_unlocked(config_path, raw)
     return normalized
 
 
@@ -156,17 +211,22 @@ def upsert_channel(channel: dict) -> dict:
     if not channel_type:
         raise ValueError("channel.type is required")
 
-    channels = get_raw_config().get("channels")
-    existing = [dict(c) for c in channels if isinstance(c, dict)] if isinstance(channels, list) else []
-    replaced = False
-    for index, item in enumerate(existing):
-        if str(item.get("id") or "").strip() == channel_id:
-            existing[index] = dict(channel)
-            replaced = True
-            break
-    if not replaced:
-        existing.append(dict(channel))
-    set_channels(existing)
+    config_path = get_config_path()
+    with _config_write_lock(config_path):
+        raw, _error = _load_config_file(config_path)
+        raw = dict(raw) if isinstance(raw, dict) else {}
+        channels = raw.get("channels")
+        existing = [dict(c) for c in channels if isinstance(c, dict)] if isinstance(channels, list) else []
+        replaced = False
+        for index, item in enumerate(existing):
+            if str(item.get("id") or "").strip() == channel_id:
+                existing[index] = dict(channel)
+                replaced = True
+                break
+        if not replaced:
+            existing.append(dict(channel))
+        raw["channels"] = existing
+        _write_config_file_unlocked(config_path, raw)
     return dict(channel)
 
 
@@ -175,10 +235,15 @@ def remove_channel(channel_id: str) -> bool:
     channel_id = str(channel_id or "").strip()
     if not channel_id:
         raise ValueError("channel_id is required")
-    channels = get_raw_config().get("channels")
-    existing = [dict(c) for c in channels if isinstance(c, dict)] if isinstance(channels, list) else []
-    filtered = [c for c in existing if str(c.get("id") or "").strip() != channel_id]
-    removed = len(filtered) != len(existing)
-    if removed:
-        set_channels(filtered)
+    config_path = get_config_path()
+    with _config_write_lock(config_path):
+        raw, _error = _load_config_file(config_path)
+        raw = dict(raw) if isinstance(raw, dict) else {}
+        channels = raw.get("channels")
+        existing = [dict(c) for c in channels if isinstance(c, dict)] if isinstance(channels, list) else []
+        filtered = [c for c in existing if str(c.get("id") or "").strip() != channel_id]
+        removed = len(filtered) != len(existing)
+        if removed:
+            raw["channels"] = filtered
+            _write_config_file_unlocked(config_path, raw)
     return removed

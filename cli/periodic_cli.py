@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import date
 
+from core.integration_api import update_task as update_task_api
 from core.models import ALLOWED_CYCLE_TYPES
 from core.observability import emit_log
 from core.system_command_runner import build_handler_payload_from_legacy_command
@@ -95,6 +97,45 @@ def validate_add_params(args: argparse.Namespace) -> None:
             args.range_end = 31
 
 
+def validate_update_params(args: argparse.Namespace) -> None:
+    """Validate only fields explicitly supplied for a partial task update."""
+    if args.task_id is None or args.task_id < 1:
+        raise ValueError("task-id must be >= 1")
+    if args.weekday is not None and (args.weekday < 0 or args.weekday > 6):
+        raise ValueError("weekday must be 0-6 (Mon=0)")
+    if args.day_of_month is not None and (args.day_of_month < 1 or args.day_of_month > 31):
+        raise ValueError("day must be 1-31")
+    if args.range_start is not None and (args.range_start < 1 or args.range_start > 31):
+        raise ValueError("range-start must be 1-31")
+    if args.range_end is not None and (args.range_end < 1 or args.range_end > 31):
+        raise ValueError("range-end must be 1-31")
+    if args.quota is not None and args.quota <= 0:
+        raise ValueError("quota must be > 0")
+    if args.n_per_month is not None and args.n_per_month <= 0:
+        raise ValueError("n-per-month must be > 0")
+    if args.interval_hours is not None and (args.interval_hours <= 0 or args.interval_hours > 24):
+        raise ValueError("interval-hours must be 1-24")
+    for field_name in ("start_date", "end_date"):
+        value = getattr(args, field_name)
+        if value:
+            try:
+                date.fromisoformat(value)
+            except ValueError as exc:
+                raise ValueError(f"{field_name.replace('_', '-')} must be YYYY-MM-DD") from exc
+    if args.dates_list:
+        cleaned = [chunk.strip() for chunk in args.dates_list.split(",") if chunk.strip()]
+        parsed_days = []
+        for chunk in cleaned:
+            try:
+                day = int(chunk)
+            except ValueError as exc:
+                raise ValueError("dates-list must contain comma-separated day numbers") from exc
+            if day < 1 or day > 31:
+                raise ValueError("dates-list day must be 1-31")
+            parsed_days.append(day)
+        args.dates_list = ",".join(str(day) for day in sorted(set(parsed_days)))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Chronos periodic task manager")
     group = parser.add_mutually_exclusive_group()
@@ -106,9 +147,9 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--run-system-task", action="store_true", help="Execute a due system occurrence and mark it completed")
 
     parser.add_argument("--name")
-    parser.add_argument("--category", default="Inbox")
-    parser.add_argument("--cycle-type", default="once", choices=CYCLE_TYPES)
-    parser.add_argument("--time", dest="time_of_day", type=parse_time_of_day, default="09:00")
+    parser.add_argument("--category")
+    parser.add_argument("--cycle-type", choices=CYCLE_TYPES)
+    parser.add_argument("--time", dest="time_of_day", type=parse_time_of_day)
     parser.add_argument("--weekday", type=int)
     parser.add_argument("--day", dest="day_of_month", type=int)
     parser.add_argument("--range-start", type=int)
@@ -120,14 +161,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-date")
     parser.add_argument("--end-date")
     parser.add_argument("--reminder-template")
-    parser.add_argument("--task-kind", default="scheduled")
-    parser.add_argument("--source", default="chronos")
+    parser.add_argument("--task-kind")
+    parser.add_argument("--source")
     parser.add_argument("--legacy-entry-id", type=int)
     parser.add_argument("--special-handler")
     parser.add_argument("--handler-payload")
     parser.add_argument("--system-command", help="whitelisted command syntax: <command_id> [arg1 ...]")
     parser.add_argument("--delivery-target")
     parser.add_argument("--delivery-mode")
+    parser.add_argument("--task-id", type=int, help="Existing task id for --update")
     parser.add_argument("--occurrence-id", type=int)
 
     return parser
@@ -143,6 +185,11 @@ def run_cli(argv: list[str] | None = None) -> int:
             if not args.name:
                 print("Missing required --name for --add")
                 return 2
+            args.category = args.category or "Inbox"
+            args.cycle_type = args.cycle_type or "once"
+            args.time_of_day = args.time_of_day or "09:00"
+            args.task_kind = args.task_kind or "scheduled"
+            args.source = args.source or "chronos"
             try:
                 validate_add_params(args)
             except ValueError as exc:
@@ -206,7 +253,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             # Reuse same validation logic as add (but optional fields)
             try:
                 # Validate provided fields (similar to add)
-                validate_add_params(args)
+                validate_update_params(args)
             except ValueError as exc:
                 print(f"参数错误：{exc}")
                 return 2
@@ -256,14 +303,8 @@ def run_cli(argv: list[str] | None = None) -> int:
             if args.delivery_mode is not None:
                 payload["delivery_mode"] = args.delivery_mode
 
-            import json, subprocess, shlex
-            json_payload = json.dumps(payload, ensure_ascii=False)
-            cmd = ["python3", "/home/ubuntu/chronos/scripts/chronos_api.py", "task", "update", "--id", str(args.task_id), "--payload", json_payload]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            print(result.stdout.strip())
-            if result.returncode != 0:
-                print("更新任务失败")
-                return 1
+            updated = update_task_api(args.task_id, payload)
+            print(json.dumps({"ok": True, "data": updated}, ensure_ascii=False, indent=2))
             return 0
 
         if args.fire_reminder:
