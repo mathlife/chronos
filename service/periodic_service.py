@@ -11,7 +11,7 @@ from core.config import get_config
 from core.db import DB, clear_task_cache, db_commit, get_periodic_task, get_periodic_tasks
 from core.learning import LearningContext
 from core.models import PeriodicTask
-from core.notifiers import dispatch_message
+from core.notifiers import dispatch_and_record, retry_due_deliveries
 from core.observability import METRICS, emit_log
 from core.occurrence_state import OccurrenceStateStore
 from core.paths import PYTHON_BIN, SCRIPTS_DIR
@@ -241,7 +241,7 @@ class PeriodicTaskManager:
             "task_name": (task or {}).get("name"),
             "task_kind": (task or {}).get("task_kind"),
         }
-        results = dispatch_message(config=config, message=message_text, meta=meta, target_ids=targets)
+        results = dispatch_and_record(config=config, message=message_text, meta=meta, target_ids=targets)
         if not results:
             METRICS.inc("notify_no_channel_total")
             emit_log("notify.no_channel", level="WARNING")
@@ -262,7 +262,7 @@ class PeriodicTaskManager:
         METRICS.inc("notify_success_total" if success else "notify_failure_total")
         return success
 
-    def _clear_occurrence_jobs(self, occurrence_id: int) -> None:
+    def _clear_occurrence_jobs(self, occurrence_id: int, *, strict: bool = True) -> bool:
         """Remove scheduler jobs, then clear DB pointers only after external cleanup succeeds."""
         reminder_job_name, execution_job_name = self.occurrence_state.get_job_refs(occurrence_id)
         try:
@@ -273,8 +273,11 @@ class PeriodicTaskManager:
         except Exception as exc:
             METRICS.inc("scheduler_job_cleanup_error_total")
             emit_log("scheduler.cleanup_remove_failed", level="ERROR", occurrence_id=occurrence_id, error=str(exc))
-            raise
+            if strict:
+                raise
+            return False
         self.occurrence_state.clear_jobs(occurrence_id, commit=False)
+        return True
 
     def _mark_occurrence_reminded(self, occurrence_id: int, reminder_job_id: str | None = None) -> None:
         self.occurrence_state.mark_reminded(occurrence_id, reminder_job_id=reminder_job_id)
@@ -357,7 +360,7 @@ class PeriodicTaskManager:
 
     def fire_reminder_occurrence(self, occurrence_id: int) -> bool:
         row = self._get_occurrence_row(occurrence_id)
-        if not row or row["status"] in ("completed", "skipped"):
+        if not row or row["status"] in ("completed", "skipped", "failed", "running"):
             return False
         occ_date = date.fromisoformat(row["date"])
         time_of_day = row["scheduled_time"] or row["time_of_day"]
@@ -367,25 +370,33 @@ class PeriodicTaskManager:
         # Defensive re-check: the occurrence may have been completed after the scheduler
         # started but before delivery is attempted.
         fresh_row = self._get_occurrence_row(occurrence_id)
-        if not fresh_row or fresh_row["status"] in ("completed", "skipped"):
+        if not fresh_row or fresh_row["status"] in ("completed", "skipped", "failed", "running"):
             return False
 
         message_text = self._format_reminder_message(row["name"], occ_date, time_of_day, row["reminder_template"], immediate=False)
         task_dict = {"id": row["task_id"], "name": row["name"], "task_kind": row["task_kind"], "delivery_target": row["delivery_target"]}
-        if not self._send_message_now(message_text, task=task_dict, occurrence_id=occurrence_id):
-            return False
-        self._mark_occurrence_reminded(occurrence_id, reminder_job_id=row["reminder_job_id"])
-        return True
+        # Cron date expressions repeat yearly, so remove the one-shot entry before
+        # network delivery. Failed channels are recovered by notification retries.
+        self._clear_occurrence_jobs(occurrence_id)
+        db_commit()
+        delivered = self._send_message_now(message_text, task=task_dict, occurrence_id=occurrence_id)
+        if delivered:
+            self._mark_occurrence_reminded(occurrence_id, reminder_job_id=None)
+        db_commit()
+        return delivered
 
     def run_system_occurrence(self, occurrence_id: int) -> bool:
         row = self._get_occurrence_row(occurrence_id)
-        if not row or row["status"] in ("completed", "skipped"):
+        if not row or row["status"] in ("completed", "skipped", "failed"):
             return False
         if row["task_kind"] != "system":
+            return False
+        if not self.occurrence_state.claim_execution(occurrence_id):
             return False
 
         result_message = None
         blocked_by_policy = False
+        execution_succeeded = True
         if row["special_handler"] == "run_command":
             METRICS.inc("system_command_attempt_total")
             try:
@@ -431,6 +442,7 @@ class PeriodicTaskManager:
                         )
                 else:
                     METRICS.inc("system_command_failure_total")
+                    execution_succeeded = False
                     result_message = (
                         f"执行失败\n"
                         f"- 命令ID：{execution.get('command_id')}\n"
@@ -448,10 +460,12 @@ class PeriodicTaskManager:
                 METRICS.inc("system_command_blocked_total")
                 result_message = f"blocked={exc}"
                 blocked_by_policy = True
+                execution_succeeded = False
                 emit_log("system_command.blocked", level="WARNING", occurrence_id=occurrence_id, error=str(exc))
             except Exception as exc:
                 METRICS.inc("system_command_error_total")
                 result_message = f"error={exc}"
+                execution_succeeded = False
                 emit_log("system_command.error", level="ERROR", occurrence_id=occurrence_id, error=str(exc))
         else:
             result_message = f"system occurrence reached due time for task {row['name']}"
@@ -464,6 +478,7 @@ class PeriodicTaskManager:
         }
 
         if blocked_by_policy:
+            self._clear_occurrence_jobs(occurrence_id)
             self._skip_occurrence_internal(
                 occurrence_id,
                 completion_mode="blocked_policy",
@@ -471,7 +486,22 @@ class PeriodicTaskManager:
             )
             message_text = f"⚠️ 系统任务阻止执行\n任务：{row['name']}\n结果：{result_message or 'blocked'}"
             self._send_message_now(message_text, task=task_dict, occurrence_id=occurrence_id)
+            db_commit()
             return True
+
+        if not execution_succeeded:
+            self.occurrence_state.fail(
+                occurrence_id,
+                error=result_message or "system command failed",
+                special_handler_result=result_message,
+                commit=False,
+            )
+            db_commit()
+            if self._clear_occurrence_jobs(occurrence_id, strict=False):
+                db_commit()
+            message_text = f"❌ 系统任务执行失败\n任务：{row['name']}\n结果：{result_message or 'failed'}"
+            self._send_message_now(message_text, task=task_dict, occurrence_id=occurrence_id)
+            return False
 
         self._complete_occurrence_internal(
             occurrence_id,
@@ -479,8 +509,8 @@ class PeriodicTaskManager:
             special_handler_result=result_message,
             clear_related_jobs=False,
         )
-        self._clear_occurrence_jobs(occurrence_id)
-        db_commit()
+        if self._clear_occurrence_jobs(occurrence_id, strict=False):
+            db_commit()
 
         message_text = f"✅ 系统任务已执行\n任务：{row['name']}\n结果：{result_message or 'ok'}"
         self._send_message_now(message_text, task=task_dict, occurrence_id=occurrence_id)
@@ -816,12 +846,29 @@ class PeriodicTaskManager:
     def run_daily(self) -> int:
         with LearningContext("periodic_manager_daily_run", "Generate today's reminders, clean old cron jobs, and push today's todo snapshot", confidence="H"):
             today = to_shanghai_date()
+            from core.integration_api import reconcile_scheduler_operations
+
+            reconciliation = reconcile_scheduler_operations()
             scheduled = self.generate_reminders_for_today()
             cleaned = self.cleanup_old_jobs(today - timedelta(days=1))
+            try:
+                retry_config = get_config()
+                retried = retry_due_deliveries(config=retry_config)
+            except ValueError:
+                retried = 0
             snapshot_sent = 1 if self._send_today_todo_snapshot(today) else 0
             METRICS.set_gauge("run_daily.last_scheduled", float(scheduled))
             METRICS.set_gauge("run_daily.last_cleaned", float(cleaned))
             METRICS.set_gauge("run_daily.last_snapshot_sent", float(snapshot_sent))
-            emit_log("periodic.run_daily.completed", scheduled=scheduled, cleaned=cleaned, snapshot_sent=snapshot_sent)
-            return scheduled + cleaned + snapshot_sent
+            METRICS.set_gauge("run_daily.last_delivery_retries", float(retried))
+            emit_log(
+                "periodic.run_daily.completed",
+                scheduled=scheduled,
+                cleaned=cleaned,
+                retried=retried,
+                reconciled=reconciliation.get("recovered", 0),
+                reconcile_failed=reconciliation.get("failed", 0),
+                snapshot_sent=snapshot_sent,
+            )
+            return scheduled + cleaned + retried + reconciliation.get("recovered", 0) + snapshot_sent
 

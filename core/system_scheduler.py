@@ -34,6 +34,10 @@ def build_job_command(python_bin: str, script_path: Path, action: str, occurrenc
     return " ".join(shlex.quote(part) for part in parts)
 
 
+def build_action_command(python_bin: str, script_path: Path, action: str) -> str:
+    return " ".join(shlex.quote(part) for part in (python_bin, str(script_path), action))
+
+
 def _read_current_crontab() -> list[str]:
     result = subprocess.run(
         ["crontab", "-l"],

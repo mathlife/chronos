@@ -69,7 +69,7 @@ python3 skills/chronos/scripts/todo.py add "刷新本地缓存" \
   --cycle-type daily \
   --time 09:30 \
   --task-kind system \
-  --system-command "powershell -NoProfile -File D:\\ops\\refresh-cache.ps1"
+  --system-command "python3 /home/ubuntu/chronos/scripts/refresh_cache.py"
 
 python3 skills/chronos/scripts/migrate_legacy_entries.py --db "$(pwd)/.Chonos/config/todo.db"
 python3 skills/chronos/scripts/migrate_legacy_entries.py --db "$(pwd)/.Chonos/config/todo.db" --apply
@@ -133,6 +133,7 @@ Open in browser:
 Features:
 - Query: runtime config, channels, all periodic tasks, today's tasks
 - Manage: task create/update/remove (deactivate or hard delete), channel upsert/remove, legacy `chat_id` update
+- Health and basic metrics: `GET /api/v1/health`
 
 Recommended deployment:
 - keep `--host 127.0.0.1` and expose through trusted reverse proxy when remote access is needed
@@ -171,9 +172,21 @@ For command-style deterministic system work:
 
 - set `task_kind=system`
 - set `special_handler=run_command` implicitly via `--system-command`
-- Chronos creates OS scheduled jobs for the reminder and the execution on Linux via `crontab`
-- reminder fires 5 minutes before `scheduled_time`
-- once the due time is reached, the occurrence is marked `completed` directly instead of staying `pending`
+- Chronos creates an execution job on Linux via `crontab`; system tasks do not emit a five-minute pre-reminder
+- `python3` and `bash` accept existing `.py`/`.sh` files only; inline (`-c`), module (`-m`), and stdin execution are blocked
+- scripts must be under the Chronos project root or a configured `system_command_allowed_roots` directory
+- execution is atomically claimed as `running`; success becomes `completed`, policy rejection becomes `skipped`, and command failure becomes `failed`
+- notification results are recorded per channel; failed channels retry independently without resending successful channels
+
+Example additional allowed root in `.Chonos/config/config.json`:
+
+```json
+{
+  "system_command_allowed_roots": [
+    "/home/ubuntu/automation"
+  ]
+}
+```
 
 `sync_subagent_memory` now reads a file-backed ledger at `memory/subagent_sync_ledger.json` via `memory_manager.py pending-subagents`, so the hourly handler no longer guesses session ids from all memory. Ledger schema/status/pending semantics are centralized in `scripts/subagent_sync_ledger.py`, and OpenClaw auto-records completed subagent sessions into that ledger on the subagent completion path. `memory_manager.py record-subagent <session_id>` remains available only for manual backfill. Successful syncs are marked handled with `mark-subagent-synced`, and failures remain pending with an updated error trail.
 

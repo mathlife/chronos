@@ -67,7 +67,7 @@ python3 skills/chronos/scripts/todo.py add "刷新本地缓存" \
   --cycle-type daily \
   --time 09:30 \
   --task-kind system \
-  --system-command "powershell -NoProfile -File D:\\ops\\refresh-cache.ps1"
+  --system-command "python3 /home/ubuntu/chronos/scripts/refresh_cache.py"
 
 python3 skills/chronos/scripts/migrate_legacy_entries.py --db "$(pwd)/.Chonos/config/todo.db"
 python3 skills/chronos/scripts/migrate_legacy_entries.py --db "$(pwd)/.Chonos/config/todo.db" --apply
@@ -134,6 +134,7 @@ python3 skills/chronos/scripts/web_dashboard.py --host 127.0.0.1 --port 8765 --r
 
 - 查询：运行时配置、通知渠道、全部周期任务、当日任务。
 - 管理：任务新增/修改/删除（停用或硬删除）、渠道 upsert/remove、legacy `chat_id` 更新。
+- 健康检查与基础指标：`GET /api/v1/health`。
 
 部署建议：
 
@@ -178,9 +179,21 @@ Chronos 面向用户的调度分类：
 
 - 设定 `task_kind=system`。
 - 通过 `--system-command` 隐式设置 `special_handler=run_command`。
-- Chronos 在 Linux 上通过 `crontab` 为提醒与执行分别建系统任务。
-- 提醒在 `scheduled_time` 前 5 分钟触发。
-- 到达执行时间后，occurrence 直接标记为 `completed`（不继续停留在 `pending`）。
+- Chronos 在 Linux 上通过 `crontab` 创建执行任务；`system` 任务不发送开始前 5 分钟提醒。
+- `python3` 和 `bash` 只允许执行已存在的 `.py`/`.sh` 文件，禁止 `-c`、`-m` 和标准输入执行。
+- 脚本必须位于 Chronos 项目目录或 `system_command_allowed_roots` 配置的目录中。
+- 执行前会原子抢占为 `running`；成功进入 `completed`，策略阻止进入 `skipped`，命令失败进入 `failed`。
+- 通知结果按渠道记录；失败渠道独立重试，不会重复推送已经成功的渠道。
+
+在 `.Chonos/config/config.json` 中增加额外允许目录：
+
+```json
+{
+  "system_command_allowed_roots": [
+    "/home/ubuntu/automation"
+  ]
+}
+```
 
 `sync_subagent_memory` 现在通过 `memory_manager.py pending-subagents` 读取 `memory/subagent_sync_ledger.json` 账本，不再从全部内存中猜测 session id。账本语义统一在 `scripts/subagent_sync_ledger.py`；OpenClaw 的 subagent 完成路径会自动写账本。`memory_manager.py record-subagent <session_id>` 仅用于人工补录。成功同步后会 `mark-subagent-synced`，失败则保持 pending 并追加错误轨迹。
 

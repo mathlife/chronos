@@ -2,10 +2,19 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import sqlite3
 import urllib.request
 import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional
+
+from .db import DB
+from .paths import PYTHON_BIN, SCRIPTS_DIR
+from .system_scheduler import build_action_command, create_once_job, supports_system_scheduler
+from .timezones import get_shanghai_tz
+
+SHANGHAI_TZ = get_shanghai_tz()
 
 
 @dataclass(frozen=True)
@@ -132,3 +141,140 @@ def dispatch_message(
         results.append(notifier.send(message, meta=meta))
     return results
 
+
+def dispatch_and_record(
+    *,
+    config: dict,
+    message: str,
+    meta: Optional[dict] = None,
+    target_ids: Optional[Iterable[str]] = None,
+) -> list[NotifyResult]:
+    """Dispatch once and persist channel-level outcomes for reusable retry handling."""
+    results = dispatch_message(config=config, message=message, meta=meta, target_ids=target_ids)
+    occurrence_id = (meta or {}).get("occurrence_id")
+    task_id = (meta or {}).get("task_id")
+    db = DB()
+    for result in results:
+        key_payload = json.dumps(
+            {
+                "occurrence_id": occurrence_id,
+                "task_id": task_id,
+                "channel_id": result.channel_id,
+                "message": message,
+                "meta": meta or {},
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        delivery_key = hashlib.sha256(key_payload.encode("utf-8")).hexdigest()
+        db.execute(
+            """
+            INSERT INTO notification_delivery
+            (delivery_key, occurrence_id, task_id, channel_id, channel_type, message, meta, status,
+             attempt_count, next_retry_at, last_error, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1,
+                    CASE WHEN ? THEN NULL ELSE datetime('now', '+5 minutes') END,
+                    ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(delivery_key) DO UPDATE SET
+                status = excluded.status,
+                attempt_count = notification_delivery.attempt_count + 1,
+                next_retry_at = excluded.next_retry_at,
+                last_error = excluded.last_error,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                delivery_key,
+                occurrence_id,
+                task_id,
+                result.channel_id,
+                result.channel_type,
+                message,
+                json.dumps(meta or {}, ensure_ascii=False),
+                "sent" if result.ok else "retry",
+                1 if result.ok else 0,
+                result.error,
+            ),
+        )
+    db.commit()
+    if any(not result.ok for result in results):
+        schedule_delivery_retry()
+    return results
+
+
+def schedule_delivery_retry(*, delay_minutes: int = 5) -> bool:
+    if not supports_system_scheduler():
+        return False
+    from datetime import datetime, timedelta
+
+    run_at = datetime.now(SHANGHAI_TZ) + timedelta(minutes=max(1, int(delay_minutes)))
+    command = build_action_command(PYTHON_BIN, SCRIPTS_DIR / "periodic_task_manager.py", "--retry-deliveries")
+    create_once_job(job_name="chronos_delivery_retry", command=command, run_at=run_at)
+    return True
+
+
+def retry_due_deliveries(*, config: dict, limit: int = 50) -> int:
+    """Retry failed channels only; successful sibling channels are never re-sent."""
+    db = DB()
+    rows = db.execute(
+        """
+        SELECT id, channel_id, message, meta, attempt_count
+        FROM notification_delivery
+        WHERE status = 'retry' AND next_retry_at <= CURRENT_TIMESTAMP AND attempt_count < 5
+        ORDER BY next_retry_at, id
+        LIMIT ?
+        """,
+        (int(limit),),
+    ).fetchall()
+    processed = 0
+    for row in rows:
+        meta_raw = row["meta"] if isinstance(row, sqlite3.Row) else row[3]
+        try:
+            meta = json.loads(meta_raw or "{}")
+        except json.JSONDecodeError:
+            meta = {}
+        results = dispatch_message(
+            config=config,
+            message=row["message"],
+            meta=meta,
+            target_ids=[row["channel_id"]],
+        )
+        result = results[0] if results else NotifyResult(False, row["channel_id"], "unknown", "channel unavailable")
+        attempt_count = int(row["attempt_count"]) + 1
+        exhausted = attempt_count >= 5
+        delay_minutes = min(60, 5 * (2 ** max(0, attempt_count - 1)))
+        db.execute(
+            """
+            UPDATE notification_delivery
+            SET status = ?, attempt_count = ?,
+                next_retry_at = CASE WHEN ? THEN NULL ELSE datetime('now', ?) END,
+                last_error = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                "sent" if result.ok else ("failed" if exhausted else "retry"),
+                attempt_count,
+                1 if result.ok or exhausted else 0,
+                f"+{delay_minutes} minutes",
+                result.error,
+                row["id"],
+            ),
+        )
+        if result.ok and meta.get("occurrence_id") and meta.get("task_kind") != "system":
+            db.execute(
+                "UPDATE periodic_occurrences SET status = 'reminded' WHERE id = ? AND status = 'pending'",
+                (int(meta["occurrence_id"]),),
+            )
+        processed += 1
+    db.commit()
+    next_due = db.execute(
+        "SELECT MIN(next_retry_at) FROM notification_delivery WHERE status = 'retry'"
+    ).fetchone()
+    if next_due and next_due[0]:
+        from datetime import datetime
+
+        due_at = datetime.fromisoformat(str(next_due[0]) + "+00:00")
+        now_utc = datetime.now(due_at.tzinfo)
+        delay_seconds = max(60, int((due_at - now_utc).total_seconds()))
+        schedule_delivery_retry(delay_minutes=(delay_seconds + 59) // 60)
+    return processed

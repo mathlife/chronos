@@ -220,7 +220,17 @@ def upsert_channel(channel: dict) -> dict:
         replaced = False
         for index, item in enumerate(existing):
             if str(item.get("id") or "").strip() == channel_id:
-                existing[index] = dict(channel)
+                merged = dict(item)
+                merged.update({key: value for key, value in channel.items() if key != "config"})
+                old_config = item.get("config") if isinstance(item.get("config"), dict) else {}
+                new_config = channel.get("config") if isinstance(channel.get("config"), dict) else {}
+                merged_config = dict(old_config)
+                for key, value in new_config.items():
+                    if key in {"bot_token", "secret"} and not str(value or "").strip():
+                        continue
+                    merged_config[key] = value
+                merged["config"] = merged_config
+                existing[index] = merged
                 replaced = True
                 break
         if not replaced:

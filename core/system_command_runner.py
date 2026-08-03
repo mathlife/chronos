@@ -4,10 +4,11 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
+from pathlib import Path
 from typing import Any
 
 from .config import get_raw_config
-from .paths import PYTHON_BIN, SCRIPTS_DIR
+from .paths import PROJECT_ROOT, PYTHON_BIN, SCRIPTS_DIR
 
 
 DEFAULT_SYSTEM_COMMAND_TEMPLATES: dict[str, list[str]] = {
@@ -85,7 +86,36 @@ def _render_argv(command_id: str, args: list[str]) -> list[str]:
             rendered.append(token.format_map(values))
         except KeyError as exc:
             raise ValueError(f"missing placeholder value for template token: {token}") from exc
-    return rendered
+    return _validate_argv_policy(command_id, rendered)
+
+
+def _allowed_script_roots() -> list[Path]:
+    roots = [PROJECT_ROOT.resolve()]
+    configured = get_raw_config().get("system_command_allowed_roots")
+    if isinstance(configured, list):
+        for item in configured:
+            if isinstance(item, str) and item.strip():
+                roots.append(Path(item).expanduser().resolve())
+    return roots
+
+
+def _validate_argv_policy(command_id: str, argv: list[str]) -> list[str]:
+    """Keep generic interpreters constrained to approved script files."""
+    if command_id not in {"python3", "bash"}:
+        return argv
+    if len(argv) < 2:
+        raise ValueError(f"{command_id} requires a script path")
+    script_arg = argv[1]
+    if not script_arg or script_arg.startswith("-"):
+        raise ValueError(f"{command_id} inline/module execution is blocked; use an approved script file")
+    script_path = Path(script_arg).expanduser().resolve()
+    expected_suffix = ".py" if command_id == "python3" else ".sh"
+    if script_path.suffix.lower() != expected_suffix or not script_path.is_file():
+        raise ValueError(f"{command_id} requires an existing {expected_suffix} script")
+    if not any(script_path == root or root in script_path.parents for root in _allowed_script_roots()):
+        raise ValueError(f"script path is outside system_command_allowed_roots: {script_path}")
+    argv[1] = str(script_path)
+    return argv
 
 
 def execute_system_handler(handler_payload: str | None, *, timeout_seconds: int = 600) -> dict[str, Any]:

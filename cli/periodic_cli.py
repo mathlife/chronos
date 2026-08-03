@@ -145,6 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--ensure-today", action="store_true", help="Ensure today's occurrences")
     group.add_argument("--fire-reminder", action="store_true", help="Fire a reminder for a scheduled occurrence")
     group.add_argument("--run-system-task", action="store_true", help="Execute a due system occurrence and mark it completed")
+    group.add_argument("--retry-deliveries", action="store_true", help="Retry failed notification channels")
 
     parser.add_argument("--name")
     parser.add_argument("--category")
@@ -321,6 +322,18 @@ def run_cli(argv: list[str] | None = None) -> int:
                 return 2
             ok = manager.run_system_occurrence(args.occurrence_id)
             print(f"System occurrence executed: {ok}")
+            return 0
+
+        if args.retry_deliveries:
+            from core.config import get_config
+            from core.notifiers import retry_due_deliveries
+            from core.system_scheduler import remove_job
+
+            # Remove the one-shot entry that launched this run. The retry service
+            # creates a fresh entry only when pending deliveries remain.
+            remove_job("chronos_delivery_retry")
+            processed = retry_due_deliveries(config=get_config())
+            print(f"Retried deliveries: {processed}")
             return 0
 
         if args.complete_activity is not None:

@@ -11,7 +11,7 @@ import sqlite3
 from typing import Any, Protocol
 
 
-TERMINAL_STATUSES = {"completed", "skipped"}
+TERMINAL_STATUSES = {"completed", "skipped", "failed"}
 JOB_REF_COLUMNS: tuple[tuple[str, str], ...] = (
     ("reminder", "reminder_job_id"),
     ("execution", "execution_job_id"),
@@ -80,6 +80,54 @@ class OccurrenceStateStore:
             self.db.commit()
         return changed
 
+    def claim_execution(self, occurrence_id: int, *, commit: bool = True) -> bool:
+        """Atomically claim one due occurrence for system execution."""
+        assignments = ["status = 'running'"]
+        if self._has_column("execution_started_at"):
+            assignments.append("execution_started_at = CURRENT_TIMESTAMP")
+        if self._has_column("last_error"):
+            assignments.append("last_error = NULL")
+        cur = self.db.execute(
+            f"UPDATE periodic_occurrences SET {', '.join(assignments)} WHERE id = ? AND status IN ('pending', 'reminded')",
+            (occurrence_id,),
+        )
+        changed = getattr(cur, "rowcount", 0) > 0
+        if changed and commit:
+            self.db.commit()
+        return changed
+
+    def fail(
+        self,
+        occurrence_id: int,
+        *,
+        error: str,
+        completion_mode: str = "execution_failed",
+        special_handler_result: str | None = None,
+        commit: bool = True,
+    ) -> bool:
+        """Move a running/non-terminal occurrence to failed with reusable metadata."""
+        assignments = [
+            "status = 'failed'",
+            "completed_at = CURRENT_TIMESTAMP",
+            "completion_mode = ?",
+            "special_handler_result = COALESCE(?, special_handler_result)",
+        ]
+        params: list[object] = [completion_mode, special_handler_result]
+        if self._has_column("last_error"):
+            assignments.append("last_error = ?")
+            params.append(error)
+        if self._has_column("retry_count"):
+            assignments.append("retry_count = retry_count + 1")
+        params.append(occurrence_id)
+        cur = self.db.execute(
+            f"UPDATE periodic_occurrences SET {', '.join(assignments)} WHERE id = ? AND status NOT IN ('completed', 'skipped', 'failed')",
+            tuple(params),
+        )
+        changed = getattr(cur, "rowcount", 0) > 0
+        if changed and commit:
+            self.db.commit()
+        return changed
+
     def complete(
         self,
         occurrence_id: int,
@@ -120,7 +168,7 @@ class OccurrenceStateStore:
             f"""
             UPDATE periodic_occurrences
             SET {', '.join(assignments)}
-            WHERE id = ? AND status NOT IN ('completed', 'skipped')
+            WHERE id = ? AND status NOT IN ('completed', 'skipped', 'failed')
             """,
             tuple(params),
         )
@@ -167,7 +215,7 @@ class OccurrenceStateStore:
             f"""
             UPDATE periodic_occurrences
             SET {', '.join(assignments)}
-            WHERE id = ? AND status NOT IN ('completed', 'skipped')
+            WHERE id = ? AND status NOT IN ('completed', 'skipped', 'failed')
             """,
             tuple(params),
         )
@@ -301,12 +349,12 @@ class OccurrenceStateStore:
     ) -> tuple[str | None, str | None]:
         """Update an active occurrence's status/time, clear jobs, and return old job refs.
 
-        Terminal rows (completed/skipped) are not changed.
+        Terminal and executing rows are not changed.
         """
         job_columns = self.job_pointer_columns()
         select_columns = job_columns or ["id"]
         row = self.db.execute(
-            f"SELECT {', '.join(select_columns)} FROM periodic_occurrences WHERE id = ? AND status NOT IN ('completed', 'skipped')",
+            f"SELECT {', '.join(select_columns)} FROM periodic_occurrences WHERE id = ? AND status NOT IN ('completed', 'skipped', 'failed', 'running')",
             (occurrence_id,),
         ).fetchone()
         if row is None:
@@ -329,7 +377,7 @@ class OccurrenceStateStore:
         assignments.extend(f"{column} = NULL" for column in job_columns)
         params.append(occurrence_id)
         self.db.execute(
-            f"UPDATE periodic_occurrences SET {', '.join(assignments)} WHERE id = ? AND status NOT IN ('completed', 'skipped')",
+            f"UPDATE periodic_occurrences SET {', '.join(assignments)} WHERE id = ? AND status NOT IN ('completed', 'skipped', 'failed', 'running')",
             tuple(params),
         )
         if commit:

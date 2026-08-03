@@ -30,6 +30,18 @@ from core.timezones import get_shanghai_tz
 SHANGHAI_TZ = get_shanghai_tz()
 _TIME_OF_DAY_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
+
+def _redact_config(config: dict) -> dict:
+    redacted: dict[str, Any] = {}
+    for key, value in config.items():
+        normalized = str(key).lower()
+        if any(token in normalized for token in ("token", "secret", "password", "key")):
+            redacted[key] = ""
+            redacted[f"has_{key}"] = bool(value)
+        else:
+            redacted[key] = value
+    return redacted
+
 HTML_PAGE = """<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -558,6 +570,10 @@ HTML_PAGE = """<!doctype html>
       setChannelFormValue('channelFormChatId', config.chat_id || '');
       setChannelFormValue('channelFormUrl', config.url || '');
       setChannelFormValue('channelFormSecret', config.secret || '');
+      const tokenInput = document.getElementById('channelFormBotToken');
+      if (tokenInput) tokenInput.placeholder = config.has_bot_token ? 'configured; leave blank to keep' : 'required for telegram';
+      const secretInput = document.getElementById('channelFormSecret');
+      if (secretInput) secretInput.placeholder = config.has_secret ? 'configured; leave blank to keep' : 'optional';
       syncChannelFormVisibility();
     }
     function startCreateChannel(showMessage = true) {
@@ -607,9 +623,11 @@ HTML_PAGE = """<!doctype html>
       const secret = String(document.getElementById('channelFormSecret').value || '').trim();
       const config = {};
       if (type === 'telegram') {
-        if (!botToken) throw new Error('telegram bot_token is required');
+        const selected = (channelsCache || []).find(c => String(c.id || '') === id);
+        const selectedConfig = selected && selected.config && typeof selected.config === 'object' ? selected.config : {};
+        if (!botToken && !selectedConfig.has_bot_token) throw new Error('telegram bot_token is required');
         if (!chatId) throw new Error('telegram chat_id is required');
-        config.bot_token = botToken;
+        if (botToken) config.bot_token = botToken;
         config.chat_id = chatId;
       } else if (type === 'webhook') {
         if (!url) throw new Error('webhook url is required');
@@ -1095,7 +1113,7 @@ def build_snapshot(db_path: Path, *, read_only: bool = False) -> dict:
                     "id": channel.get("id"),
                     "type": channel.get("type"),
                     "enabled": False if channel.get("enabled", True) is False else True,
-                    "config": channel.get("config") if isinstance(channel.get("config"), dict) else channel,
+                    "config": _redact_config(channel.get("config") if isinstance(channel.get("config"), dict) else channel),
                 }
             )
 
@@ -1110,7 +1128,7 @@ def build_snapshot(db_path: Path, *, read_only: bool = False) -> dict:
             SELECT
               id, name, category, cycle_type, weekday, day_of_month, range_start, range_end,
               n_per_month, interval_hours, time_of_day, end_date, start_date, reminder_template,
-              task_kind, source, legacy_entry_id, special_handler, handler_payload,
+              task_kind, source, legacy_entry_id, special_handler,
               delivery_target, delivery_mode, dates_list, is_active
             FROM periodic_tasks
             ORDER BY is_active DESC, id DESC

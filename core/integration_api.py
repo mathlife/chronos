@@ -315,6 +315,81 @@ def _recreate_removed_jobs(removed_jobs: list[dict]) -> list[str]:
     return errors
 
 
+def _task_matches_patch(current: dict | None, patch: dict) -> bool:
+    """Return whether the persisted task already reflects an interrupted update."""
+    if not current:
+        return False
+    return all(current.get(key) == value for key, value in patch.items())
+
+
+def _job_descriptors(payload: dict) -> list[dict]:
+    descriptors: list[dict] = []
+    jobs = payload.get("jobs")
+    for job_row in jobs if isinstance(jobs, list) else []:
+        if not isinstance(job_row, dict):
+            continue
+        for kind, job_name in iter_job_refs(job_row):
+            descriptors.append({"kind": kind, "job_name": job_name, "row": job_row})
+    return descriptors
+
+
+def reconcile_scheduler_operations(*, limit: int = 50) -> dict[str, int]:
+    """Recover interrupted scheduler mutations using the shared operation log."""
+    db = DB()
+    rows = db.execute(
+        """
+        SELECT id, operation, task_id, payload
+        FROM scheduler_operation_log
+        WHERE status IN ('planned', 'failed') AND attempt_count < 5
+        ORDER BY created_at
+        LIMIT ?
+        """,
+        (int(limit),),
+    ).fetchall()
+    recovered = 0
+    failed = 0
+    for row in rows:
+        operation_id = str(row["id"])
+        try:
+            payload = json.loads(row["payload"] or "{}")
+            if not isinstance(payload, dict):
+                raise ValueError("operation payload must be an object")
+            operation = str(row["operation"])
+            task_id = int(row["task_id"])
+            current = get_task(task_id)
+            should_restore_previous_jobs = False
+
+            if operation == "update_task":
+                patch = payload.get("task_patch")
+                if not isinstance(patch, dict):
+                    raise ValueError("update operation is missing task_patch")
+                if _task_matches_patch(current, patch):
+                    warning = _sync_today_schedule()
+                    if warning:
+                        raise RuntimeError(f"updated task schedule resync failed: {warning}")
+                else:
+                    should_restore_previous_jobs = True
+            elif operation == "remove_task_hard":
+                should_restore_previous_jobs = current is not None
+            elif operation == "remove_task_soft":
+                should_restore_previous_jobs = bool(current and current.get("is_active"))
+            else:
+                raise ValueError(f"unsupported scheduler operation: {operation}")
+
+            if should_restore_previous_jobs:
+                errors = _recreate_removed_jobs(_job_descriptors(payload))
+                if errors:
+                    raise RuntimeError("; ".join(errors))
+            _update_scheduler_operation(db, operation_id=operation_id, status="reconciled", error=None, bump_attempt=True)
+            db_commit()
+            recovered += 1
+        except Exception as exc:
+            _update_scheduler_operation(db, operation_id=operation_id, status="failed", error=str(exc), bump_attempt=True)
+            db_commit()
+            failed += 1
+    return {"recovered": recovered, "failed": failed}
+
+
 def list_tasks(*, active_only: bool | None = None) -> list[dict]:
     db = DB()
     query = "SELECT * FROM periodic_tasks"
@@ -651,6 +726,7 @@ def remove_task(task_id: int, *, hard: bool = False) -> bool:
     row_payloads = occurrence_state.job_payloads_for_task(task_id)
     occurrence_ids = [int(row["occurrence_id"]) for row in row_payloads]
     operation_payload = {
+        "task_before": current,
         "hard": bool(hard),
         "job_count": len(row_payloads),
         "jobs": row_payloads,
