@@ -12,14 +12,17 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.integration_api import (
+    complete_occurrence,
     create_task,
     delete_channel,
+    get_occurrence,
     get_task,
     list_channels,
     list_tasks,
     put_channel,
     remove_task,
     replace_channels,
+    skip_occurrence,
     update_task,
 )
 
@@ -46,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  chronos_api.py task list --active-only true\n"
             "  chronos_api.py task get --id 42\n"
             "  chronos_api.py task create --payload '{\"name\":\"Daily review\",\"cycle_type\":\"daily\",\"time_of_day\":\"09:00\"}'\n"
+            "  chronos_api.py occurrence complete --id 4725 --payload '{\"completion_mode\":\"manual\"}'\n"
             "  chronos_api.py channel replace --payload @channels.json\n\n"
             "Output is always JSON with shape: {\"ok\": bool, \"data\": ..., \"error\": ...}."
         ),
@@ -65,6 +69,16 @@ def build_parser() -> argparse.ArgumentParser:
     remove_parser = task_subparsers.add_parser("remove", help="Deactivate or hard-delete task")
     remove_parser.add_argument("--id", type=int, required=True)
     remove_parser.add_argument("--hard", action="store_true")
+
+    occurrence_parser = subparsers.add_parser("occurrence", help="Single occurrence operations")
+    occurrence_subparsers = occurrence_parser.add_subparsers(dest="occurrence_cmd", required=True)
+    occurrence_subparsers.add_parser("get", help="Get one occurrence").add_argument("--id", type=int, required=True)
+    complete_parser = occurrence_subparsers.add_parser("complete", help="Mark one occurrence completed")
+    complete_parser.add_argument("--id", type=int, required=True)
+    complete_parser.add_argument("--payload", default="{}")
+    skip_parser = occurrence_subparsers.add_parser("skip", help="Mark one occurrence skipped")
+    skip_parser.add_argument("--id", type=int, required=True)
+    skip_parser.add_argument("--payload", default="{}")
 
     channel_parser = subparsers.add_parser("channel", help="Channel operations")
     channel_subparsers = channel_parser.add_subparsers(dest="channel_cmd", required=True)
@@ -113,6 +127,25 @@ def main() -> int:
                 if not removed:
                     return _emit({"ok": False, "error": f"task {args.id} not found"}, code=2)
                 return _emit({"ok": True, "data": {"id": args.id, "hard": args.hard}}, code=0)
+
+        if args.resource == "occurrence":
+            if args.occurrence_cmd == "get":
+                data = get_occurrence(args.id)
+                if data is None:
+                    return _emit({"ok": False, "error": f"occurrence {args.id} not found"}, code=2)
+                return _emit({"ok": True, "data": data}, code=0)
+            if args.occurrence_cmd == "complete":
+                payload = _load_json_arg(args.payload)
+                if not isinstance(payload, dict):
+                    raise ValueError("occurrence complete payload must be an object")
+                data = complete_occurrence(args.id, payload)
+                return _emit({"ok": True, "data": data}, code=0)
+            if args.occurrence_cmd == "skip":
+                payload = _load_json_arg(args.payload)
+                if not isinstance(payload, dict):
+                    raise ValueError("occurrence skip payload must be an object")
+                data = skip_occurrence(args.id, payload)
+                return _emit({"ok": True, "data": data}, code=0)
 
         if args.resource == "channel":
             if args.channel_cmd == "list":

@@ -14,7 +14,18 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from core import db as db_module
 from core import paths as paths_module
-from core.integration_api import create_task, delete_channel, list_channels, put_channel, remove_task, replace_channels, update_task
+from core.integration_api import (
+    complete_occurrence,
+    create_task,
+    delete_channel,
+    get_occurrence,
+    list_channels,
+    put_channel,
+    remove_task,
+    replace_channels,
+    skip_occurrence,
+    update_task,
+)
 from scripts.test_helpers import make_case_dir, reset_db_singleton
 
 
@@ -64,6 +75,9 @@ CREATE TABLE periodic_occurrences (
     scheduled_time TEXT,
     scheduled_at TEXT,
     legacy_entry_id INTEGER,
+    completion_source TEXT,
+    trigger_label TEXT,
+    trigger_command TEXT,
     FOREIGN KEY (task_id) REFERENCES periodic_tasks(id) ON DELETE CASCADE,
     UNIQUE(task_id, date, scheduled_time)
 );
@@ -194,6 +208,65 @@ def test_remove_task_supports_old_occurrence_schema_without_execution_job_id() -
     assert row == (0,)
 
     db_module.DB().close()
+    reset_db_singleton(db_module)
+
+
+def test_occurrence_api_complete_and_skip_single_rows() -> None:
+    db_path = make_case_dir("integration-occurrence-api") / "todo.db"
+    prepare_temp_db(db_path)
+    paths_module.TODO_DB = db_path
+    db_module.TODO_DB = db_path
+    reset_db_singleton(db_module)
+
+    task = create_task(
+        {
+            "name": "Occurrence API task",
+            "cycle_type": "daily",
+            "time_of_day": "09:00",
+            "task_kind": "scheduled",
+        }
+    )
+    db = db_module.DB()
+    db.execute(
+        """
+        INSERT INTO periodic_occurrences (id, task_id, date, status, reminder_job_id, execution_job_id, scheduled_time, scheduled_at)
+        VALUES (101, ?, '2026-05-03', 'pending', 'chronos_reminder_101', 'chronos_exec_101', '09:00', '2026-05-03T09:00:00')
+        """,
+        (task["id"],),
+    )
+    db.execute(
+        """
+        INSERT INTO periodic_occurrences (id, task_id, date, status, reminder_job_id, execution_job_id, scheduled_time, scheduled_at)
+        VALUES (102, ?, '2026-05-04', 'pending', 'chronos_reminder_102', 'chronos_exec_102', '09:00', '2026-05-04T09:00:00')
+        """,
+        (task["id"],),
+    )
+    db_module.db_commit()
+
+    with mock.patch("core.integration_api.supports_system_scheduler", return_value=False):
+        completed = complete_occurrence(101, {"trigger_label": "chat_complete"})
+        skipped = skip_occurrence(102, {})
+
+    assert completed["changed"] is True
+    assert completed["status"] == "completed"
+    assert completed["completion_mode"] == "manual"
+    assert completed["task_name"] == "Occurrence API task"
+    assert skipped["changed"] is True
+    assert skipped["status"] == "skipped"
+    assert skipped["completion_mode"] == "skipped"
+    assert skipped["completion_source"] == "assistant_skip"
+
+    fetched = get_occurrence(101)
+    assert fetched is not None
+    assert fetched["status"] == "completed"
+    assert fetched["reminder_job_id"] is None
+    assert fetched["execution_job_id"] is None
+
+    second_complete = complete_occurrence(101, {})
+    assert second_complete["changed"] is False
+    assert second_complete["status"] == "completed"
+
+    db.close()
     reset_db_singleton(db_module)
 
 
@@ -383,6 +456,8 @@ if __name__ == "__main__":
     print("[ok] integration API task flow")
     test_monthly_cycle_canonicalization()
     print("[ok] monthly cycle aliases are canonicalized")
+    test_occurrence_api_complete_and_skip_single_rows()
+    print("[ok] occurrence API complete/skip single rows")
     test_channel_flow()
     print("[ok] integration API channel flow")
     test_remove_task_failure_keeps_db_state()

@@ -31,6 +31,9 @@ OCCURRENCE_SCHEMA_COLUMNS = {
     'scheduled_at': "ALTER TABLE periodic_occurrences ADD COLUMN scheduled_at TEXT",
     'legacy_entry_id': "ALTER TABLE periodic_occurrences ADD COLUMN legacy_entry_id INTEGER",
     'execution_job_id': "ALTER TABLE periodic_occurrences ADD COLUMN execution_job_id TEXT",
+    'completion_source': "ALTER TABLE periodic_occurrences ADD COLUMN completion_source TEXT",
+    'trigger_label': "ALTER TABLE periodic_occurrences ADD COLUMN trigger_label TEXT",
+    'trigger_command': "ALTER TABLE periodic_occurrences ADD COLUMN trigger_command TEXT",
 }
 
 SCHEDULER_OPERATION_LOG_TABLE_SQL = """

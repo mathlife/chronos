@@ -20,6 +20,8 @@ _TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
 SHANGHAI_TZ = get_shanghai_tz()
 
 TASK_MUTABLE_FIELDS = {
+    "quota",
+
     "name",
     "category",
     "cycle_type",
@@ -421,6 +423,107 @@ def update_task(task_id: int, patch: dict) -> dict:
     if not updated:
         raise RuntimeError(f"task {task_id} not found after update")
     return updated
+
+
+def _row_to_dict(row: Any) -> dict | None:
+    if row is None:
+        return None
+    if hasattr(row, "keys"):
+        return {key: row[key] for key in row.keys()}
+    return dict(row)
+
+
+def get_occurrence(occurrence_id: int) -> dict | None:
+    row = DB().execute(
+        """
+        SELECT o.*, t.name AS task_name, t.cycle_type AS task_cycle_type, t.time_of_day AS task_time_of_day
+        FROM periodic_occurrences o
+        LEFT JOIN periodic_tasks t ON t.id = o.task_id
+        WHERE o.id = ?
+        """,
+        (occurrence_id,),
+    ).fetchone()
+    return _row_to_dict(row)
+
+
+def _normalize_occurrence_payload(payload: dict | None, *, action: str) -> dict:
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise ValueError("occurrence payload must be an object")
+    allowed = {"completion_mode", "special_handler_result", "completion_source", "trigger_label", "trigger_command"}
+    unknown = sorted(set(payload.keys()) - allowed)
+    if unknown:
+        raise ValueError(f"unknown occurrence fields: {', '.join(unknown)}")
+    normalized = dict(payload)
+    if action == "complete":
+        normalized.setdefault("completion_mode", "manual")
+        normalized.setdefault("completion_source", "assistant_sync")
+    elif action == "skip":
+        normalized.setdefault("completion_mode", "skipped")
+        normalized.setdefault("completion_source", "assistant_skip")
+    return normalized
+
+
+def _remove_occurrence_jobs_if_possible(occurrence: dict) -> list[str]:
+    warnings: list[str] = []
+    job_refs = iter_job_refs(occurrence)
+    if not job_refs:
+        return warnings
+    if not supports_system_scheduler():
+        warnings.append("scheduler unavailable; cleared DB job pointers only")
+        return warnings
+    for kind, job_name in job_refs:
+        ok = remove_job(job_name)
+        if not ok:
+            raise RuntimeError(f"failed to remove {kind} job {job_name}")
+    return warnings
+
+
+def _mutate_occurrence_status(occurrence_id: int, payload: dict | None, *, action: str) -> dict:
+    current = get_occurrence(occurrence_id)
+    if not current:
+        raise ValueError(f"occurrence {occurrence_id} not found")
+    normalized = _normalize_occurrence_payload(payload, action=action)
+    warnings = _remove_occurrence_jobs_if_possible(current)
+    store = OccurrenceStateStore(DB())
+    if action == "complete":
+        changed = store.complete(
+            occurrence_id,
+            completion_mode=str(normalized["completion_mode"]),
+            special_handler_result=normalized.get("special_handler_result"),
+            completion_source=normalized.get("completion_source"),
+            trigger_label=normalized.get("trigger_label"),
+            trigger_command=normalized.get("trigger_command"),
+        )
+    elif action == "skip":
+        changed = store.skip(
+            occurrence_id,
+            completion_mode=str(normalized["completion_mode"]),
+            special_handler_result=normalized.get("special_handler_result"),
+            completion_source=normalized.get("completion_source"),
+            trigger_label=normalized.get("trigger_label"),
+            trigger_command=normalized.get("trigger_command"),
+        )
+    else:
+        raise ValueError(f"unsupported occurrence action: {action}")
+    if iter_job_refs(current):
+        store.clear_jobs(occurrence_id)
+    updated = get_occurrence(occurrence_id)
+    if not updated:
+        raise RuntimeError(f"occurrence {occurrence_id} not found after update")
+    updated["changed"] = bool(changed)
+    if warnings:
+        updated["warnings"] = warnings
+    return updated
+
+
+def complete_occurrence(occurrence_id: int, payload: dict | None = None) -> dict:
+    return _mutate_occurrence_status(occurrence_id, payload, action="complete")
+
+
+def skip_occurrence(occurrence_id: int, payload: dict | None = None) -> dict:
+    return _mutate_occurrence_status(occurrence_id, payload, action="skip")
 
 
 def remove_task(task_id: int, *, hard: bool = False) -> bool:

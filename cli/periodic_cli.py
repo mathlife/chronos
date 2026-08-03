@@ -34,8 +34,8 @@ def validate_add_params(args: argparse.Namespace) -> None:
         raise ValueError("range-start must be 1-31")
     if args.range_end is not None and (args.range_end < 1 or args.range_end > 31):
         raise ValueError("range-end must be 1-31")
-    if args.n_per_month is not None and args.n_per_month <= 0:
-        raise ValueError("n-per-month must be > 0")
+    if args.quota is not None and args.quota <= 0:
+        raise ValueError("quota must be > 0")
     if args.interval_hours is not None and (args.interval_hours <= 0 or args.interval_hours > 24):
         raise ValueError("interval-hours must be 1-24")
     if args.end_date:
@@ -99,6 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Chronos periodic task manager")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--add", action="store_true", help="Add a periodic task")
+    group.add_argument("--update", action="store_true", help="Update an existing task")
     group.add_argument("--complete-activity", type=int, help="Complete activity by task id")
     group.add_argument("--ensure-today", action="store_true", help="Ensure today's occurrences")
     group.add_argument("--fire-reminder", action="store_true", help="Fire a reminder for a scheduled occurrence")
@@ -114,6 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--range-end", type=int)
     parser.add_argument("--n-per-month", type=int)
     parser.add_argument("--interval-hours", type=int)
+    parser.add_argument("--quota", type=int, help="Maximum completions per month")
     parser.add_argument("--dates-list")
     parser.add_argument("--start-date")
     parser.add_argument("--end-date")
@@ -165,6 +167,8 @@ def run_cli(argv: list[str] | None = None) -> int:
                 params["range_end"] = args.range_end
             if args.n_per_month is not None:
                 params["n_per_month"] = args.n_per_month
+            if args.quota is not None:
+                params["quota"] = args.quota
             if args.interval_hours is not None:
                 params["interval_hours"] = args.interval_hours
             if args.dates_list is not None:
@@ -192,6 +196,74 @@ def run_cli(argv: list[str] | None = None) -> int:
             activity_id = manager.add_activity(**params)
             manager.ensure_today_occurrences()
             print(f"✅ Added task {activity_id}: {params.get('name')}")
+            return 0
+
+        if args.update:
+            # Update an existing task
+            if args.task_id is None:
+                print("Missing required --task-id for --update")
+                return 2
+            # Reuse same validation logic as add (but optional fields)
+            try:
+                # Validate provided fields (similar to add)
+                validate_add_params(args)
+            except ValueError as exc:
+                print(f"参数错误：{exc}")
+                return 2
+            # Build payload with only provided args
+            payload = {}
+            if args.name is not None:
+                payload["name"] = args.name
+            if args.category is not None:
+                payload["category"] = args.category
+            if args.cycle_type is not None:
+                payload["cycle_type"] = args.cycle_type
+            if args.time_of_day is not None:
+                payload["time_of_day"] = args.time_of_day
+            if args.weekday is not None:
+                payload["weekday"] = args.weekday
+            if args.day_of_month is not None:
+                payload["day_of_month"] = args.day_of_month
+            if args.range_start is not None:
+                payload["range_start"] = args.range_start
+            if args.range_end is not None:
+                payload["range_end"] = args.range_end
+            if args.n_per_month is not None:
+                payload["n_per_month"] = args.n_per_month
+            if args.quota is not None:
+                payload["quota"] = args.quota
+            if args.interval_hours is not None:
+                payload["interval_hours"] = args.interval_hours
+            if args.dates_list is not None:
+                payload["dates_list"] = args.dates_list
+            if args.start_date is not None:
+                payload["start_date"] = args.start_date
+            if args.end_date is not None:
+                payload["end_date"] = args.end_date
+            if args.reminder_template is not None:
+                payload["reminder_template"] = args.reminder_template
+            if args.legacy_entry_id is not None:
+                payload["legacy_entry_id"] = args.legacy_entry_id
+            if args.special_handler is not None:
+                payload["special_handler"] = args.special_handler
+            if args.handler_payload is not None:
+                payload["handler_payload"] = args.handler_payload
+            if args.system_command is not None:
+                payload["special_handler"] = "run_command"
+                payload["handler_payload"] = build_handler_payload_from_legacy_command(args.system_command)
+            if args.delivery_target is not None:
+                payload["delivery_target"] = args.delivery_target
+            if args.delivery_mode is not None:
+                payload["delivery_mode"] = args.delivery_mode
+
+            import json, subprocess, shlex
+            json_payload = json.dumps(payload, ensure_ascii=False)
+            cmd = ["python3", "/home/ubuntu/chronos/scripts/chronos_api.py", "task", "update", "--id", str(args.task_id), "--payload", json_payload]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            print(result.stdout.strip())
+            if result.returncode != 0:
+                print("更新任务失败")
+                return 1
             return 0
 
         if args.fire_reminder:

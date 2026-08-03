@@ -307,8 +307,12 @@ class PeriodicTaskManager:
                 "SELECT cycle_type, n_per_month, count_current_month, range_start, range_end FROM periodic_tasks WHERE id = ?",
                 (task_id,),
             ).fetchone()
-            if cycle_type_row and cycle_type_row[0] == 'monthly_n_times':
-                self.db.execute("UPDATE periodic_tasks SET count_current_month = count_current_month + 1 WHERE id = ?", (task_id,))
+            if cycle_type_row:
+                # Increment quota counter for tasks that have a per‑month limit (monthly_n_times or monthly_dates with n_per_month)
+                cycle_type = cycle_type_row[0]
+                n_per_month = cycle_type_row[2]
+                if (cycle_type == 'monthly_n_times') or (cycle_type == 'monthly_dates' and n_per_month):
+                    self.db.execute("UPDATE periodic_tasks SET count_current_month = count_current_month + 1 WHERE id = ?", (task_id,))
             occ_row = self.db.execute("SELECT date FROM periodic_occurrences WHERE id = ?", (occurrence_id,)).fetchone()
             if occ_row and occ_row[0]:
                 try:

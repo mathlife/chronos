@@ -155,6 +155,9 @@ class TaskScheduler:
             return today.weekday() == self.task.weekday
 
         if self.task.cycle_type in ('monthly_fixed', 'monthly_dates'):
+            # Enforce quota if n_per_month is set (used as limit for total completions)
+            if self.task.n_per_month and self.task.count_current_month >= self.task.n_per_month:
+                return False
             return today in self._get_monthly_dates(today.year, today.month)
 
         if self.task.cycle_type in ('monthly_range', 'monthly_n_times'):
