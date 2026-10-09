@@ -177,10 +177,22 @@ def dispatch_and_record(
                     CASE WHEN ? THEN NULL ELSE datetime('now', '+5 minutes') END,
                     ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             ON CONFLICT(delivery_key) DO UPDATE SET
-                status = excluded.status,
-                attempt_count = notification_delivery.attempt_count + 1,
-                next_retry_at = excluded.next_retry_at,
-                last_error = excluded.last_error,
+                status = CASE
+                    WHEN notification_delivery.status = 'sent' THEN 'sent'
+                    ELSE excluded.status
+                END,
+                attempt_count = CASE
+                    WHEN notification_delivery.status = 'sent' THEN notification_delivery.attempt_count
+                    ELSE notification_delivery.attempt_count + 1
+                END,
+                next_retry_at = CASE
+                    WHEN notification_delivery.status = 'sent' THEN NULL
+                    ELSE excluded.next_retry_at
+                END,
+                last_error = CASE
+                    WHEN notification_delivery.status = 'sent' THEN NULL
+                    ELSE excluded.last_error
+                END,
                 updated_at = CURRENT_TIMESTAMP
             """,
             (

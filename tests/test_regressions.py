@@ -299,6 +299,22 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(saved["channels"][0]["config"]["bot_token"], "keep")
             self.assertEqual(saved["channels"][0]["config"]["chat_id"], "2")
 
+    def test_notification_delivery_is_idempotent_after_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._create_db(temp_dir)
+            meta = {"occurrence_id": 10, "task_id": 1}
+            success = NotifyResult(True, "tg", "telegram")
+            with mock.patch.object(notifier_module, "dispatch_message", return_value=[success]), mock.patch.object(
+                notifier_module, "schedule_delivery_retry"
+            ) as schedule:
+                notifier_module.dispatch_and_record(config={}, message="same", meta=meta)
+                notifier_module.dispatch_and_record(config={}, message="same", meta=meta)
+            row = db_module.DB().execute(
+                "SELECT status, attempt_count, next_retry_at, last_error FROM notification_delivery"
+            ).fetchone()
+            self.assertEqual(tuple(row), ("sent", 1, None, None))
+            schedule.assert_not_called()
+
     def test_notification_retry_targets_failed_channel_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             self._create_db(temp_dir)
