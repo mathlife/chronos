@@ -396,7 +396,19 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT status FROM periodic_occurrences WHERE id = 10").fetchone()[0], "reminded")
             db.close()
 
-    def test_schema_migration_preserves_optional_occurrence_metadata(self) -> None:
+    def test_ensure_today_occurrences_metrics_failed_insert(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._create_db(temp_dir)
+            db = db_module.DB()
+            db.execute("INSERT INTO periodic_tasks (id, name, cycle_type, time_of_day, is_active) VALUES (1, 'job', 'daily', '09:00', 1)")
+            db.commit()
+            manager = PeriodicTaskManager()
+            with mock.patch.object(manager, "create_occurrence_if_missing", side_effect=RuntimeError("db busy")):
+                before = METRICS.snapshot()["counters"].get("scheduler_occurrence_generation_error_total", 0)
+                self.assertEqual(manager.ensure_today_occurrences(), 0)
+                after = METRICS.snapshot()["counters"].get("scheduler_occurrence_generation_error_total", 0)
+            self.assertEqual(after - before, 1)
+
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "todo.db"
             conn = sqlite3.connect(db_path)

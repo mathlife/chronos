@@ -703,8 +703,14 @@ class PeriodicTaskManager:
 
             schedule_times = scheduler.get_hourly_schedule_for_day(today) if task.cycle_type == 'hourly' else [task.time_of_day]
             for schedule_time in schedule_times:
-                occ_id = self.create_occurrence_if_missing(task.id, today, scheduled_time=schedule_time)
+                try:
+                    occ_id = self.create_occurrence_if_missing(task.id, today, scheduled_time=schedule_time)
+                except Exception as exc:
+                    METRICS.inc("scheduler_occurrence_generation_error_total")
+                    emit_log("scheduler.occurrence_generation_failed", level="ERROR", task_id=task.id, error=str(exc))
+                    continue
                 if not occ_id:
+                    METRICS.inc("scheduler_occurrence_generation_empty_total")
                     continue
                 if getattr(task, 'task_kind', 'scheduled') == 'system' and schedule_time:
                     execution_expr = self._execution_job_select_expr()
