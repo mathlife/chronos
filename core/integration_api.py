@@ -10,6 +10,7 @@ from typing import Any
 from .config import get_raw_config, remove_channel, set_channels, upsert_channel
 from .db import DB, clear_task_cache, db_commit
 from .models import ALLOWED_CYCLE_TYPES
+from .monthly_quota import complete_remaining_quota_occurrences
 from .occurrence_state import OccurrenceStateStore, iter_job_refs
 from .paths import PYTHON_BIN, SCRIPTS_DIR
 from .system_command_runner import build_handler_payload_from_legacy_command
@@ -698,6 +699,31 @@ def _mutate_occurrence_status(occurrence_id: int, payload: dict | None, *, actio
         raise ValueError(f"unsupported occurrence action: {action}")
     if iter_job_refs(current):
         store.clear_jobs(occurrence_id)
+
+    if action == "complete" and changed:
+        task_row = DB().execute(
+            """
+            SELECT t.cycle_type, t.n_per_month, t.range_start, t.range_end
+            FROM periodic_occurrences o
+            JOIN periodic_tasks t ON t.id = o.task_id
+            WHERE o.id = ?
+            """,
+            (occurrence_id,),
+        ).fetchone()
+        occurrence_day = date.fromisoformat(str(current["date"])) if current.get("date") else date.today()
+        auto_completed_ids = complete_remaining_quota_occurrences(
+            DB(), task_id=int(current["task_id"]), occurrence_date=occurrence_day, task_row=task_row
+        )
+        for auto_id in auto_completed_ids:
+            auto_occurrence = get_occurrence(auto_id)
+            if auto_occurrence:
+                for _kind, job_name in iter_job_refs(auto_occurrence):
+                    if supports_system_scheduler():
+                        remove_job(job_name)
+                OccurrenceStateStore(DB()).clear_jobs(auto_id)
+        if auto_completed_ids:
+            db_commit()
+
     updated = get_occurrence(occurrence_id)
     if not updated:
         raise RuntimeError(f"occurrence {occurrence_id} not found after update")

@@ -12,7 +12,7 @@ from cli.periodic_cli import build_parser, run_cli, validate_update_params
 from core import config as config_module
 from core import db as db_module
 from core import notifiers as notifier_module
-from core.integration_api import _normalize_task_payload, reconcile_scheduler_operations, update_task
+from core.integration_api import _normalize_task_payload, complete_occurrence, reconcile_scheduler_operations, update_task
 from core.notifiers import NotifyResult
 from core.occurrence_state import OccurrenceStateStore
 from core.scheduler import resolve_monthly_quota_window
@@ -114,6 +114,37 @@ class RegressionTests(unittest.TestCase):
             resolve_monthly_quota_window(cycle_type="monthly_dates", target_day=date(2026, 8, 12)),
             (date(2026, 8, 1), date(2026, 8, 31)),
         )
+
+    def test_complete_occurrence_syncs_monthly_range_quota_through_api(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "todo.db"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(SCHEMA)
+            conn.execute(
+                """
+                INSERT INTO periodic_tasks
+                (id, name, category, cycle_type, range_start, range_end, n_per_month,
+                 time_of_day, event_time, timezone, is_active, count_current_month,
+                 task_kind, source, created_at, updated_at)
+                VALUES (1, 'monthly range', 'Inbox', 'monthly_range', 1, 31, 1,
+                        '10:00', '10:00', 'Asia/Shanghai', 1, 0,
+                        'scheduled', 'chronos', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """
+            )
+            conn.execute(
+                "INSERT INTO periodic_occurrences (id, task_id, date, status, scheduled_time) VALUES (10, 1, '2026-09-08', 'pending', '10:00')"
+            )
+            conn.execute(
+                "INSERT INTO periodic_occurrences (id, task_id, date, status, scheduled_time) VALUES (11, 1, '2026-09-09', 'pending', '10:00')"
+            )
+            conn.commit()
+            conn.close()
+            self._use_temp_db(db_path)
+
+            updated = complete_occurrence(10, {"completion_mode": "manual", "completion_source": "test"})
+            self.assertEqual(updated["status"], "completed")
+            row = db_module.DB().execute("SELECT status, is_auto_completed FROM periodic_occurrences WHERE id = 11").fetchone()
+            self.assertEqual(tuple(row), ("completed", 1))
 
     def test_update_replaces_pending_occurrence_and_resyncs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
