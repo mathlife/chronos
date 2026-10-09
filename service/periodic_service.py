@@ -11,6 +11,7 @@ from core.config import get_config
 from core.db import DB, clear_task_cache, db_commit, get_periodic_task, get_periodic_tasks
 from core.learning import LearningContext
 from core.models import PeriodicTask
+from core.monthly_quota import complete_remaining_quota_occurrences
 from core.notifiers import dispatch_and_record, retry_due_deliveries
 from core.observability import METRICS, emit_log
 from core.occurrence_state import OccurrenceStateStore
@@ -306,16 +307,10 @@ class PeriodicTaskManager:
         row = cur.fetchone()
         if row:
             task_id = row[0]
-            cycle_type_row = self.db.execute(
+            task_row = self.db.execute(
                 "SELECT cycle_type, n_per_month, count_current_month, range_start, range_end FROM periodic_tasks WHERE id = ?",
                 (task_id,),
             ).fetchone()
-            if cycle_type_row:
-                # Increment quota counter for tasks that have a per‑month limit (monthly_n_times or monthly_dates with n_per_month)
-                cycle_type = cycle_type_row[0]
-                n_per_month = cycle_type_row[1]
-                if (cycle_type == 'monthly_n_times') or (cycle_type == 'monthly_dates' and n_per_month):
-                    self.db.execute("UPDATE periodic_tasks SET count_current_month = count_current_month + 1 WHERE id = ?", (task_id,))
             occ_row = self.db.execute("SELECT date FROM periodic_occurrences WHERE id = ?", (occurrence_id,)).fetchone()
             if occ_row and occ_row[0]:
                 try:
@@ -324,10 +319,19 @@ class PeriodicTaskManager:
                     occ_day = to_shanghai_date()
             else:
                 occ_day = to_shanghai_date()
+            auto_completed_ids = complete_remaining_quota_occurrences(
+                self.db,
+                task_id=task_id,
+                occurrence_date=occ_day,
+                task_row=task_row,
+            )
+            for auto_id in auto_completed_ids:
+                self._clear_occurrence_jobs(auto_id)
+            if auto_completed_ids:
+                db_commit()
             if clear_related_jobs:
                 # When one occurrence is manually completed, clear same-day reminder/execution jobs for this task.
                 self._clear_day_reminder_jobs(task_id=task_id, occ_day=occ_day)
-                self._apply_monthly_quota_completion(task_id=task_id, occurrence_date=occ_day, task_row=cycle_type_row)
             db_commit()
         return True
 

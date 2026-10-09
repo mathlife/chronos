@@ -90,14 +90,21 @@ def complete_remaining_quota_occurrences(
     if not ids:
         return []
     placeholders = ",".join("?" for _ in ids)
+    rows = db.execute(
+        "PRAGMA table_info(periodic_occurrences)"
+    ).fetchall()
+    columns = {_value(row, "name", 1) for row in rows}
+    assignments = ["status = 'completed'", "is_auto_completed = 1", "completion_mode = COALESCE(completion_mode, 'auto_quota')"]
+    if "completion_source" in columns:
+        assignments.append("completion_source = COALESCE(completion_source, 'quota')")
+    if "trigger_label" in columns:
+        assignments.append("trigger_label = COALESCE(trigger_label, 'monthly_quota')")
+    if "trigger_command" in columns:
+        assignments.append("trigger_command = COALESCE(trigger_command, 'complete_periodic_occurrence')")
     db.execute(
         f"""
         UPDATE periodic_occurrences
-        SET status = 'completed', is_auto_completed = 1,
-            completion_mode = COALESCE(completion_mode, 'auto_quota'),
-            completion_source = COALESCE(completion_source, 'quota'),
-            trigger_label = COALESCE(trigger_label, 'monthly_quota'),
-            trigger_command = COALESCE(trigger_command, 'complete_periodic_occurrence')
+        SET {', '.join(assignments)}
         WHERE id IN ({placeholders})
         """,
         ids,
