@@ -113,7 +113,12 @@ class RegressionTests(unittest.TestCase):
         self.assertIsNone(args.time_of_day)
         self.assertIsNone(args.category)
 
-    def test_quota_is_canonicalized(self) -> None:
+    def test_periodic_cli_validation_uses_stable_error_code(self) -> None:
+        with mock.patch("builtins.print") as output:
+            self.assertEqual(run_cli(["--add", "--name", "weekly", "--cycle-type", "weekly"]), 2)
+        rendered = " ".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn("error_code=invalid_request", rendered)
+
         normalized = _normalize_task_payload({"quota": 3}, partial=True)
         self.assertEqual(normalized, {"n_per_month": 3})
         with self.assertRaisesRegex(ValueError, "must match"):

@@ -15,6 +15,11 @@ from service.periodic_service import PeriodicTaskManager
 CYCLE_TYPES = list(ALLOWED_CYCLE_TYPES)
 
 
+def _emit_cli_error(message: str, *, error_code: str, code: int) -> int:
+    print(f"❌ {message} [error_code={error_code}]")
+    return code
+
+
 def parse_time_of_day(value: str) -> str:
     import re
     match = re.fullmatch(r"(\d{1,2}):(\d{2})", value.strip())
@@ -184,7 +189,7 @@ def run_cli(argv: list[str] | None = None) -> int:
 
         if args.add:
             if not args.name:
-                print("Missing required --name for --add")
+                print("❌ Missing required --name for --add [error_code=invalid_request]")
                 return 2
             args.category = args.category or "Inbox"
             args.cycle_type = args.cycle_type or "once"
@@ -194,8 +199,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             try:
                 validate_add_params(args)
             except ValueError as exc:
-                print(f"参数错误：{exc}")
-                return 2
+                return _emit_cli_error(f"参数错误：{exc}", error_code="invalid_request", code=2)
 
             params = {
                 "name": args.name,
@@ -249,15 +253,13 @@ def run_cli(argv: list[str] | None = None) -> int:
         if args.update:
             # Update an existing task
             if args.task_id is None:
-                print("Missing required --task-id for --update")
-                return 2
+                return _emit_cli_error("Missing required --task-id for --update", error_code="invalid_request", code=2)
             # Reuse same validation logic as add (but optional fields)
             try:
                 # Validate provided fields (similar to add)
                 validate_update_params(args)
             except ValueError as exc:
-                print(f"参数错误：{exc}")
-                return 2
+                return _emit_cli_error(f"参数错误：{exc}", error_code="invalid_request", code=2)
             # Build payload with only provided args
             payload = {}
             if args.name is not None:
@@ -310,16 +312,14 @@ def run_cli(argv: list[str] | None = None) -> int:
 
         if args.fire_reminder:
             if args.occurrence_id is None:
-                print("Missing required --occurrence-id for --fire-reminder")
-                return 2
+                return _emit_cli_error("Missing required --occurrence-id for --fire-reminder", error_code="invalid_request", code=2)
             ok = manager.fire_reminder_occurrence(args.occurrence_id)
             print(f"Reminder fired: {ok}")
             return 0
 
         if args.run_system_task:
             if args.occurrence_id is None:
-                print("Missing required --occurrence-id for --run-system-task")
-                return 2
+                return _emit_cli_error("Missing required --occurrence-id for --run-system-task", error_code="invalid_request", code=2)
             ok = manager.run_system_occurrence(args.occurrence_id)
             print(f"System occurrence executed: {ok}")
             return 0
@@ -349,9 +349,12 @@ def run_cli(argv: list[str] | None = None) -> int:
         result = manager.run_daily()
         print(f"Periodic task manager: processed {result} items")
         return 0
+    except ValueError as exc:
+        emit_log("periodic.cli.validation_error", level="WARNING", error=str(exc), error_code="invalid_request")
+        return _emit_cli_error(str(exc), error_code="invalid_request", code=2)
     except Exception as exc:
-        emit_log("periodic.cli.error", level="ERROR", error=str(exc))
-        raise
+        emit_log("periodic.cli.error", level="ERROR", error=str(exc), error_code="internal_error")
+        return _emit_cli_error(str(exc), error_code="internal_error", code=1)
     finally:
         manager.db.close()
 
