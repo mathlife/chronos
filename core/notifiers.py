@@ -237,9 +237,26 @@ def _claim_delivery(db: Any, delivery_id: int) -> bool:
     return cursor.rowcount == 1
 
 
+def _recover_stale_processing(db: Any, *, timeout_minutes: int = 10) -> bool:
+    cursor = db.execute(
+        """
+        UPDATE notification_delivery
+        SET status = 'retry',
+            next_retry_at = CURRENT_TIMESTAMP,
+            last_error = COALESCE(last_error, 'processing timeout; reclaimed'),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE status = 'processing'
+          AND updated_at <= datetime('now', ?)
+        """,
+        (f"-{max(1, int(timeout_minutes))} minutes",),
+    )
+    return cursor.rowcount > 0
+
+
 def retry_due_deliveries(*, config: dict, limit: int = 50) -> int:
     """Retry failed channels only; successful sibling channels are never re-sent."""
     db = DB()
+    _recover_stale_processing(db)
     rows = db.execute(
         """
         SELECT id, channel_id, message, meta, attempt_count

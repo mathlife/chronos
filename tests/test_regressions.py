@@ -327,7 +327,19 @@ class RegressionTests(unittest.TestCase):
             self.assertFalse(notifier_module._claim_delivery(db, 1))
             self.assertEqual(db.execute("SELECT status FROM notification_delivery WHERE id = 1").fetchone()[0], "processing")
 
-    def test_notification_retry_targets_failed_channel_only(self) -> None:
+    def test_notification_processing_claim_recovers_after_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._create_db(temp_dir)
+            db = db_module.DB()
+            db.execute(
+                "INSERT INTO notification_delivery (delivery_key, channel_id, channel_type, message, status, next_retry_at, updated_at) VALUES ('stale', 'tg', 'telegram', 'm', 'processing', CURRENT_TIMESTAMP, datetime('now', '-10 minutes'))"
+            )
+            db.commit()
+            self.assertTrue(notifier_module._recover_stale_processing(db, timeout_minutes=5))
+            row = db.execute("SELECT status, next_retry_at FROM notification_delivery WHERE id = 1").fetchone()
+            self.assertEqual(row["status"], "retry")
+            self.assertIsNotNone(row["next_retry_at"])
+
         with tempfile.TemporaryDirectory() as temp_dir:
             self._create_db(temp_dir)
             db = db_module.DB()
