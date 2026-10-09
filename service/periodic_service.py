@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -855,6 +856,7 @@ class PeriodicTaskManager:
 
     def run_daily(self) -> int:
         with LearningContext("periodic_manager_daily_run", "Generate today's reminders, clean old cron jobs, and push today's todo snapshot", confidence="H"):
+            started_at = time.perf_counter()
             today = to_shanghai_date()
             from core.integration_api import reconcile_scheduler_operations
 
@@ -871,6 +873,8 @@ class PeriodicTaskManager:
             METRICS.set_gauge("run_daily.last_cleaned", float(cleaned))
             METRICS.set_gauge("run_daily.last_snapshot_sent", float(snapshot_sent))
             METRICS.set_gauge("run_daily.last_delivery_retries", float(retried))
+            METRICS.set_gauge("run_daily.last_duration_seconds", time.perf_counter() - started_at)
+            METRICS.inc("run_daily_completed_total")
             emit_log(
                 "periodic.run_daily.completed",
                 scheduled=scheduled,

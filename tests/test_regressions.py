@@ -396,7 +396,22 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT status FROM periodic_occurrences WHERE id = 10").fetchone()[0], "reminded")
             db.close()
 
-    def test_ensure_today_occurrences_metrics_failed_insert(self) -> None:
+    def test_run_daily_records_duration_and_task_counts(self) -> None:
+        with mock.patch.object(PeriodicTaskManager, "generate_reminders_for_today", return_value=3), mock.patch.object(
+            PeriodicTaskManager, "cleanup_old_jobs", return_value=2
+        ), mock.patch.object(PeriodicTaskManager, "_send_today_todo_snapshot", return_value=True), mock.patch(
+            "service.periodic_service.retry_due_deliveries", return_value=1
+        ), mock.patch(
+            "core.integration_api.reconcile_scheduler_operations", return_value={"recovered": 4, "failed": 0}
+        ):
+            manager = PeriodicTaskManager()
+            result = manager.run_daily()
+        snapshot = METRICS.snapshot()
+        self.assertEqual(result, 11)
+        self.assertEqual(snapshot["gauges"]["run_daily.last_scheduled"], 3.0)
+        self.assertEqual(snapshot["gauges"]["run_daily.last_cleaned"], 2.0)
+        self.assertEqual(snapshot["gauges"]["run_daily.last_delivery_retries"], 1.0)
+
         with tempfile.TemporaryDirectory() as temp_dir:
             self._create_db(temp_dir)
             db = db_module.DB()
