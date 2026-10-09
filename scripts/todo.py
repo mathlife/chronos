@@ -29,6 +29,7 @@ from core.legacy_archive import (
 from core.config import get_config_path
 from core.notifiers import dispatch_message
 from core.paths import PYTHON_BIN, SCRIPTS_DIR, TODO_DB, WORKSPACE
+from core.integration_api import skip_occurrence
 from core.models import ALLOWED_CYCLE_TYPES
 from core.scheduler import resolve_monthly_quota_window
 from core.system_command_runner import execute_system_handler
@@ -946,80 +947,45 @@ def cmd_skip(identifier):
     if identifier.startswith('FIN-'):
         occ_id = int(identifier[4:])
         try:
-            conn = sqlite3.connect(str(TODO_DB))
-            cur = conn.cursor()
-
-            cur.execute("SELECT task_id, date FROM periodic_occurrences WHERE id = ?", (occ_id,))
-            row = cur.fetchone()
-            if not row:
-                print(f"❌ 未找到 FIN-{occ_id}")
-                conn.close()
-                return
-
-            occurrence_columns = {info[1] for info in cur.execute("PRAGMA table_info(periodic_occurrences)").fetchall()}
-            if "execution_job_id" in occurrence_columns:
-                cur.execute("SELECT status, reminder_job_id, execution_job_id FROM periodic_occurrences WHERE id = ?", (occ_id,))
-            else:
-                cur.execute("SELECT status, reminder_job_id, NULL FROM periodic_occurrences WHERE id = ?", (occ_id,))
-            current_status, job_name, execution_job_id = cur.fetchone()
-            if current_status == 'skipped':
-                print(f"⚠️  FIN-{occ_id} 已经是跳过状态")
-                conn.close()
-                return
-
-            state_store = OccurrenceStateStore(conn)
-            changed = state_store.skip(
+            result = skip_occurrence(
                 occ_id,
-                completion_mode='manual',
-                completion_source='manual_cli',
-                trigger_label='manual_skip',
-                trigger_command='todo.py skip',
-                commit=False,
+                {
+                    "completion_mode": "manual",
+                    "completion_source": "manual_cli",
+                    "trigger_label": "manual_skip",
+                    "trigger_command": "todo.py skip",
+                },
             )
-            if not changed:
-                print(f"⚠️  FIN-{occ_id} 已经是终止状态")
-                conn.close()
-                return
-
-            for _kind, scheduler_job_name in iter_job_refs_from_pair(job_name, execution_job_id):
-                try:
-                    remove_job(scheduler_job_name)
-                except Exception:
-                    pass
-
-            conn.commit()
-            conn.close()
-
-            print(f"✅ 已跳过 FIN-{occ_id}（配额不受影响）")
+            print(f"✅ 已跳过 FIN-{occ_id}（配额不受影响）" if result.get("changed") else f"⚠️  FIN-{occ_id} 已经是终止状态")
         except Exception as e:
             print(f"❌ 跳过失败：{e}")
-    else:
-        entry_id = parse_entry_identifier(identifier)
-        try:
-            conn = sqlite3.connect(str(TODO_DB))
-            cur = conn.cursor()
-            state = get_entry_archive_state(cur, entry_id)
-            if not state:
-                print(f"❌ 未找到 ID {entry_id}")
-                conn.close()
-                return
-
-            current_status = state['status']
-            if state['is_archived']:
-                print(archive_block_message(entry_id, state))
-                conn.close()
-                return
-            if current_status == 'skipped':
-                print(f"⚠️  ID {entry_id} 已经是跳过状态")
-                conn.close()
-                return
-
-            cur.execute("UPDATE entries SET status = 'skipped', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (entry_id,))
-            conn.commit()
+        return
+    entry_id = parse_entry_identifier(identifier)
+    try:
+        conn = sqlite3.connect(str(TODO_DB))
+        cur = conn.cursor()
+        state = get_entry_archive_state(cur, entry_id)
+        if not state:
+            print(f"❌ 未找到 ID {entry_id}")
             conn.close()
-            print(f"✅ 已跳过任务 ID {entry_id}")
-        except Exception as e:
-            print(f"❌ 跳过失败：{e}")
+            return
+
+        current_status = state['status']
+        if state['is_archived']:
+            print(archive_block_message(entry_id, state))
+            conn.close()
+            return
+        if current_status == 'skipped':
+            print(f"⚠️  ID {entry_id} 已经是跳过状态")
+            conn.close()
+            return
+
+        cur.execute("UPDATE entries SET status = 'skipped', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (entry_id,))
+        conn.commit()
+        conn.close()
+        print(f"✅ 已跳过任务 ID {entry_id}")
+    except Exception as e:
+        print(f"❌ 跳过失败：{e}")
 
 
 def cmd_show(identifier):
