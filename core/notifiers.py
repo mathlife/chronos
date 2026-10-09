@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional
 
 from .db import DB
+from .observability import METRICS, emit_log
 from .paths import PYTHON_BIN, SCRIPTS_DIR
 from .system_scheduler import build_action_command, create_once_job, supports_system_scheduler
 from .timezones import get_shanghai_tz
@@ -250,7 +251,11 @@ def _recover_stale_processing(db: Any, *, timeout_minutes: int = 10) -> bool:
         """,
         (f"-{max(1, int(timeout_minutes))} minutes",),
     )
-    return cursor.rowcount > 0
+    rowcount = cursor.rowcount
+    if rowcount:
+        METRICS.inc("notification_retry_reclaimed_total", rowcount)
+        emit_log("notification.retry_reclaimed", level="WARNING", count=rowcount)
+    return rowcount > 0
 
 
 def retry_due_deliveries(*, config: dict, limit: int = 50) -> int:
@@ -307,6 +312,18 @@ def retry_due_deliveries(*, config: dict, limit: int = 50) -> int:
             db.execute(
                 "UPDATE periodic_occurrences SET status = 'reminded' WHERE id = ? AND status = 'pending'",
                 (int(meta["occurrence_id"]),),
+            )
+        if result.ok:
+            METRICS.inc("notification_retry_sent_total")
+        else:
+            METRICS.inc("notification_retry_failed_total")
+            emit_log(
+                "notification.retry_failed",
+                level="WARNING",
+                delivery_id=int(row["id"]),
+                channel_id=row["channel_id"],
+                attempt_count=attempt_count,
+                error=result.error,
             )
         processed += 1
     db.commit()

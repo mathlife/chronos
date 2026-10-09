@@ -14,6 +14,7 @@ from core import db as db_module
 from core import notifiers as notifier_module
 from core.integration_api import _normalize_task_payload, complete_occurrence, reconcile_scheduler_operations, update_task
 from core.notifiers import NotifyResult
+from core.observability import METRICS
 from core.occurrence_state import OccurrenceStateStore
 from core.scheduler import resolve_monthly_quota_window
 from core.system_command_runner import _render_argv
@@ -340,6 +341,25 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(row["status"], "retry")
             self.assertIsNotNone(row["next_retry_at"])
 
+    def test_notification_retry_metrics_track_recovery_and_outcome(self) -> None:
+        before = METRICS.snapshot()["counters"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._create_db(temp_dir)
+            db = db_module.DB()
+            db.execute(
+                "INSERT INTO notification_delivery (delivery_key, channel_id, channel_type, message, status, next_retry_at, updated_at) VALUES ('metric-stale', 'tg', 'telegram', 'm', 'processing', CURRENT_TIMESTAMP, datetime('now', '-10 minutes'))"
+            )
+            db.commit()
+            notifier_module._recover_stale_processing(db, timeout_minutes=5)
+            db.execute("UPDATE notification_delivery SET next_retry_at = CURRENT_TIMESTAMP WHERE status = 'retry'")
+            db.commit()
+            with mock.patch.object(notifier_module, "dispatch_message", return_value=[NotifyResult(True, "tg", "telegram")]):
+                notifier_module.retry_due_deliveries(config={})
+        after = METRICS.snapshot()["counters"]
+        self.assertEqual(after.get("notification_retry_reclaimed_total", 0) - before.get("notification_retry_reclaimed_total", 0), 1)
+        self.assertEqual(after.get("notification_retry_sent_total", 0) - before.get("notification_retry_sent_total", 0), 1)
+
+    def test_notification_retry_targets_failed_channel_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             self._create_db(temp_dir)
             db = db_module.DB()
