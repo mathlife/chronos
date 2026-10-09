@@ -416,6 +416,8 @@ class RegressionTests(unittest.TestCase):
         ), mock.patch.object(PeriodicTaskManager, "_send_today_todo_snapshot", return_value=True), mock.patch(
             "service.periodic_service.retry_due_deliveries", return_value=1
         ), mock.patch(
+            "service.periodic_service.get_config", return_value={"channels": []}
+        ), mock.patch(
             "core.integration_api.reconcile_scheduler_operations", return_value={"recovered": 4, "failed": 0}
         ):
             manager = PeriodicTaskManager()
