@@ -177,6 +177,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--delivery-mode")
     parser.add_argument("--task-id", type=int, help="Existing task id for --update")
     parser.add_argument("--occurrence-id", type=int)
+    parser.add_argument("--json", action="store_true", dest="json_output")
 
     return parser
 
@@ -333,17 +334,26 @@ def run_cli(argv: list[str] | None = None) -> int:
             # creates a fresh entry only when pending deliveries remain.
             remove_job("chronos_delivery_retry")
             processed = retry_due_deliveries(config=get_config())
-            print(f"Retried deliveries: {processed}")
+            if args.json_output:
+                print(json.dumps({"ok": True, "data": {"retried": processed}}, ensure_ascii=False))
+            else:
+                print(f"Retried deliveries: {processed}")
             return 0
 
         if args.complete_activity is not None:
             affected = manager.complete_activity_cycle(args.complete_activity)
-            print(f"Completed {affected} occurrences for task {args.complete_activity}")
+            if args.json_output:
+                print(json.dumps({"ok": True, "data": {"completed": affected, "task_id": args.complete_activity}}, ensure_ascii=False))
+            else:
+                print(f"Completed {affected} occurrences for task {args.complete_activity}")
             return 0
 
         if args.ensure_today:
             count = manager.ensure_today_occurrences()
-            print(f"Ensured {count} occurrences for today")
+            if args.json_output:
+                print(json.dumps({"ok": True, "data": {"ensured": count}}, ensure_ascii=False))
+            else:
+                print(f"Ensured {count} occurrences for today")
             return 0
 
         result = manager.run_daily()

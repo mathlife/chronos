@@ -113,7 +113,17 @@ class RegressionTests(unittest.TestCase):
         self.assertIsNone(args.time_of_day)
         self.assertIsNone(args.category)
 
-    def test_periodic_cli_validation_uses_stable_error_code(self) -> None:
+    def test_periodic_cli_json_success_contract(self) -> None:
+        manager = mock.Mock()
+        manager.db = mock.Mock()
+        manager.ensure_today_occurrences.return_value = 3
+        with mock.patch("cli.periodic_cli.PeriodicTaskManager", return_value=manager), mock.patch(
+            "builtins.print"
+        ) as output:
+            self.assertEqual(run_cli(["--ensure-today", "--json"]), 0)
+        payload = json.loads(output.call_args.args[0])
+        self.assertEqual(payload, {"ok": True, "data": {"ensured": 3}})
+
         with mock.patch("builtins.print") as output:
             self.assertEqual(run_cli(["--add", "--name", "weekly", "--cycle-type", "weekly"]), 2)
         rendered = " ".join(str(call.args[0]) for call in output.call_args_list)
