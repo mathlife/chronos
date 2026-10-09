@@ -225,6 +225,18 @@ def schedule_delivery_retry(*, delay_minutes: int = 5) -> bool:
     return True
 
 
+def _claim_delivery(db: Any, delivery_id: int) -> bool:
+    cursor = db.execute(
+        """
+        UPDATE notification_delivery
+        SET status = 'processing', updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND status = 'retry' AND next_retry_at <= CURRENT_TIMESTAMP
+        """,
+        (delivery_id,),
+    )
+    return cursor.rowcount == 1
+
+
 def retry_due_deliveries(*, config: dict, limit: int = 50) -> int:
     """Retry failed channels only; successful sibling channels are never re-sent."""
     db = DB()
@@ -240,6 +252,8 @@ def retry_due_deliveries(*, config: dict, limit: int = 50) -> int:
     ).fetchall()
     processed = 0
     for row in rows:
+        if not _claim_delivery(db, int(row["id"])):
+            continue
         meta_raw = row["meta"] if isinstance(row, sqlite3.Row) else row[3]
         try:
             meta = json.loads(meta_raw or "{}")
@@ -261,7 +275,7 @@ def retry_due_deliveries(*, config: dict, limit: int = 50) -> int:
             SET status = ?, attempt_count = ?,
                 next_retry_at = CASE WHEN ? THEN NULL ELSE datetime('now', ?) END,
                 last_error = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
+            WHERE id = ? AND status = 'processing'
             """,
             (
                 "sent" if result.ok else ("failed" if exhausted else "retry"),

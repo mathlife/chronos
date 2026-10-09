@@ -315,6 +315,18 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(tuple(row), ("sent", 1, None, None))
             schedule.assert_not_called()
 
+    def test_notification_retry_claim_is_atomic(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._create_db(temp_dir)
+            db = db_module.DB()
+            db.execute(
+                "INSERT INTO notification_delivery (delivery_key, channel_id, channel_type, message, status, next_retry_at) VALUES ('k', 'tg', 'telegram', 'm', 'retry', CURRENT_TIMESTAMP)"
+            )
+            db.commit()
+            self.assertTrue(notifier_module._claim_delivery(db, 1))
+            self.assertFalse(notifier_module._claim_delivery(db, 1))
+            self.assertEqual(db.execute("SELECT status FROM notification_delivery WHERE id = 1").fetchone()[0], "processing")
+
     def test_notification_retry_targets_failed_channel_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             self._create_db(temp_dir)
