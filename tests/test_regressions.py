@@ -96,7 +96,16 @@ class RegressionTests(unittest.TestCase):
         conn.close()
         return self._use_temp_db(db_path)
 
-    def test_update_parser_has_no_create_defaults(self) -> None:
+    def test_json_api_error_contract_classifies_validation_errors(self) -> None:
+        with mock.patch("sys.argv", ["chronos_api.py", "task", "create", "--payload", "[]"]), mock.patch(
+            "builtins.print"
+        ) as output:
+            from scripts import chronos_api
+            self.assertEqual(chronos_api.main(), 2)
+        payload = json.loads(output.call_args.args[0])
+        self.assertEqual(payload["error_code"], "invalid_request")
+        self.assertFalse(payload["ok"])
+
         args = build_parser().parse_args(["--update", "--task-id", "7", "--name", "renamed"])
         validate_update_params(args)
         self.assertEqual(args.task_id, 7)

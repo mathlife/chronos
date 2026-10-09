@@ -40,6 +40,18 @@ def _emit(payload: dict, *, code: int) -> int:
     return code
 
 
+def _emit_error(message: str, *, error_code: str, code: int) -> int:
+    return _emit({"ok": False, "error": message, "error_code": error_code}, code=code)
+
+
+def _classify_error(exc: Exception) -> tuple[str, int]:
+    if isinstance(exc, ValueError):
+        return "invalid_request", 2
+    if isinstance(exc, FileNotFoundError):
+        return "input_not_found", 2
+    return "internal_error", 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Chronos integration JSON API",
@@ -108,7 +120,7 @@ def main() -> int:
             if args.task_cmd == "get":
                 data = get_task(args.id)
                 if data is None:
-                    return _emit({"ok": False, "error": f"task {args.id} not found"}, code=2)
+                    return _emit_error(f"task {args.id} not found", error_code="not_found", code=2)
                 return _emit({"ok": True, "data": data}, code=0)
             if args.task_cmd == "create":
                 payload = _load_json_arg(args.payload)
@@ -125,14 +137,14 @@ def main() -> int:
             if args.task_cmd == "remove":
                 removed = remove_task(args.id, hard=args.hard)
                 if not removed:
-                    return _emit({"ok": False, "error": f"task {args.id} not found"}, code=2)
+                    return _emit_error(f"task {args.id} not found", error_code="not_found", code=2)
                 return _emit({"ok": True, "data": {"id": args.id, "hard": args.hard}}, code=0)
 
         if args.resource == "occurrence":
             if args.occurrence_cmd == "get":
                 data = get_occurrence(args.id)
                 if data is None:
-                    return _emit({"ok": False, "error": f"occurrence {args.id} not found"}, code=2)
+                    return _emit_error(f"occurrence {args.id} not found", error_code="not_found", code=2)
                 return _emit({"ok": True, "data": data}, code=0)
             if args.occurrence_cmd == "complete":
                 payload = _load_json_arg(args.payload)
@@ -165,12 +177,13 @@ def main() -> int:
             if args.channel_cmd == "remove":
                 removed = delete_channel(args.id)
                 if not removed:
-                    return _emit({"ok": False, "error": f"channel {args.id} not found"}, code=2)
+                    return _emit_error(f"channel {args.id} not found", error_code="not_found", code=2)
                 return _emit({"ok": True, "data": {"id": args.id}}, code=0)
 
-        return _emit({"ok": False, "error": "unsupported command"}, code=2)
+        return _emit_error("unsupported command", error_code="unsupported_command", code=2)
     except Exception as exc:
-        return _emit({"ok": False, "error": str(exc)}, code=1)
+        error_code, code = _classify_error(exc)
+        return _emit_error(str(exc), error_code=error_code, code=code)
 
 
 if __name__ == "__main__":
