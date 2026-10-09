@@ -569,123 +569,42 @@ def complete_periodic_occurrence(
     trigger_command: str | None = None,
     allow_auto_for_scheduled: bool = False,
 ) -> tuple[bool, str]:
+    from core.integration_api import complete_occurrence
+
     conn = sqlite3.connect(str(TODO_DB))
     try:
-        cur = conn.cursor()
-        occurrence_columns = {info[1] for info in cur.execute("PRAGMA table_info(periodic_occurrences)").fetchall()}
-        execution_expr = "o.execution_job_id" if "execution_job_id" in occurrence_columns else "NULL"
-        cur.execute(
-            f"""
-            SELECT o.task_id, o.status, COALESCE(t.task_kind, 'scheduled'), o.date, o.reminder_job_id, {execution_expr}
+        row = conn.execute(
+            """
+            SELECT o.status, COALESCE(t.task_kind, 'scheduled')
             FROM periodic_occurrences o
-            JOIN periodic_tasks t ON o.task_id = t.id
+            JOIN periodic_tasks t ON t.id = o.task_id
             WHERE o.id = ?
             """,
             (occ_id,),
-        )
-        row = cur.fetchone()
-        if not row:
-            return False, f"❌ 未找到 FIN-{occ_id}"
-
-        task_id, current_status, task_kind, occurrence_date, reminder_job_id, execution_job_id = row
-        if current_status == 'skipped':
-            return False, f"❌ 无法完成已跳过的任务 FIN-{occ_id}"
-        if current_status == 'completed':
-            return True, f"⚠️  FIN-{occ_id} 已完成"
-
-        if completion_source != 'manual_cli' and task_kind != 'system' and not allow_auto_for_scheduled:
-            return False, f"❌ 自动路径拒绝处理非 system 任务 FIN-{occ_id} (task_kind={task_kind})"
-
-        state_store = OccurrenceStateStore(conn)
-        changed = state_store.complete(
-            occ_id,
-            completion_mode=completion_mode,
-            special_handler_result=special_handler_result,
-            completion_source=completion_source,
-            trigger_label=trigger_label,
-            trigger_command=trigger_command,
-            commit=False,
-        )
-        if not changed:
-            return False, f"❌ 无法完成 FIN-{occ_id}"
-
-        for _kind, scheduler_job_name in iter_job_refs_from_pair(reminder_job_id, execution_job_id):
-            remove_job(scheduler_job_name)
-        task_columns = {row[1] for row in cur.execute("PRAGMA table_info(periodic_tasks)").fetchall()}
-        select_columns = ['cycle_type']
-        if 'n_per_month' in task_columns:
-            select_columns.append('n_per_month')
-        if 'count_current_month' in task_columns:
-            select_columns.append('count_current_month')
-        if 'range_start' in task_columns:
-            select_columns.append('range_start')
-        if 'range_end' in task_columns:
-            select_columns.append('range_end')
-        column_index = {name: idx for idx, name in enumerate(select_columns)}
-        cur.execute(f"SELECT {', '.join(select_columns)} FROM periodic_tasks WHERE id = ?", (task_id,))
-        cycle_type_row = cur.fetchone()
-        cycle_type = cycle_type_row[0] if cycle_type_row else None
-        n_per_month = cycle_type_row[column_index['n_per_month']] if cycle_type_row and 'n_per_month' in column_index else None
-        if cycle_type in ('monthly_n_times', 'monthly_range') and n_per_month is not None:
-            if 'count_current_month' in task_columns:
-                cur.execute("UPDATE periodic_tasks SET count_current_month = count_current_month + 1 WHERE id = ?", (task_id,))
-            try:
-                quota_limit = int(n_per_month)
-            except (TypeError, ValueError):
-                quota_limit = 0
-            range_start = cycle_type_row[column_index['range_start']] if cycle_type_row and 'range_start' in column_index else None
-            range_end = cycle_type_row[column_index['range_end']] if cycle_type_row and 'range_end' in column_index else None
-            occ_day = date.fromisoformat(occurrence_date) if occurrence_date else datetime.now().date()
-            window = resolve_monthly_quota_window(
-                cycle_type=cycle_type or '',
-                target_day=occ_day,
-                range_start=range_start,
-                range_end=range_end,
-            )
-            if quota_limit > 0 and window:
-                win_start, win_end = window
-                cur.execute(
-                    """
-                    SELECT COUNT(1)
-                    FROM periodic_occurrences
-                    WHERE task_id = ? AND status = 'completed'
-                      AND date >= ? AND date <= ?
-                    """,
-                    (task_id, win_start.isoformat(), win_end.isoformat()),
-                )
-                completed_count = int((cur.fetchone() or [0])[0] or 0)
-                if completed_count >= quota_limit:
-                    quota_sql = """
-                        UPDATE periodic_occurrences
-                        SET status = 'completed', is_auto_completed = 1,
-                            completion_mode = COALESCE(completion_mode, 'auto_quota')
-                    """
-                    if 'completion_source' in occurrence_columns:
-                        quota_sql += ",\n                            completion_source = COALESCE(completion_source, 'quota')"
-                    if 'trigger_label' in occurrence_columns:
-                        quota_sql += ",\n                            trigger_label = COALESCE(trigger_label, 'monthly_quota')"
-                    if 'trigger_command' in occurrence_columns:
-                        quota_sql += ",\n                            trigger_command = COALESCE(trigger_command, 'complete_periodic_occurrence')"
-                    quota_sql += """
-                        WHERE task_id = ? AND status IN ('pending', 'reminded')
-                          AND date >= ? AND date <= ?
-                    """
-                    cur.execute(quota_sql, (task_id, win_start.isoformat(), win_end.isoformat()))
-                    quota_occurrence_ids = state_store.find_completed_ids_with_jobs_in_date_window(
-                        task_id,
-                        win_start.isoformat(),
-                        win_end.isoformat(),
-                    )
-                    quota_job_refs = state_store.clear_jobs_for_ids(quota_occurrence_ids, commit=False)
-                    for reminder_ref, execution_ref in quota_job_refs:
-                        for _kind, job_name in iter_job_refs_from_pair(reminder_ref, execution_ref):
-                            remove_job(job_name)
-
-        conn.commit()
+        ).fetchone()
     finally:
         conn.close()
+    if not row:
+        return False, f"❌ 未找到 FIN-{occ_id}"
+    current_status, task_kind = row
+    if current_status == "skipped":
+        return False, f"❌ 无法完成已跳过的任务 FIN-{occ_id}"
+    if current_status == "completed":
+        return True, f"⚠️  FIN-{occ_id} 已完成"
+    if completion_source != "manual_cli" and task_kind != "system" and not allow_auto_for_scheduled:
+        return False, f"❌ 自动路径拒绝处理非 system 任务 FIN-{occ_id} (task_kind={task_kind})"
 
-    return True, f"✅ 已完成 FIN-{occ_id}（任务ID {task_id}）"
+    complete_occurrence(
+        occ_id,
+        {
+            "completion_mode": completion_mode,
+            "special_handler_result": special_handler_result,
+            "completion_source": completion_source,
+            "trigger_label": trigger_label,
+            "trigger_command": trigger_command,
+        },
+    )
+    return True, f"✅ 已完成 FIN-{occ_id}"
 
 
 def get_entry_archive_state(cur: sqlite3.Cursor, entry_id: int) -> dict | None:
