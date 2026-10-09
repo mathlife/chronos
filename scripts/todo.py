@@ -29,7 +29,7 @@ from core.legacy_archive import (
 from core.config import get_config_path
 from core.notifiers import dispatch_message
 from core.paths import PYTHON_BIN, SCRIPTS_DIR, TODO_DB, WORKSPACE
-from core.integration_api import skip_occurrence
+from core.integration_api import create_task, skip_occurrence
 from core.models import ALLOWED_CYCLE_TYPES
 from core.scheduler import resolve_monthly_quota_window
 from core.system_command_runner import execute_system_handler
@@ -889,28 +889,15 @@ def cmd_add(text, category='Inbox', cycle_type='once', **kwargs):
             print(f"❌ 添加失败：{result.stderr or result.stdout}")
     else:
         try:
-            conn = sqlite3.connect(str(TODO_DB))
-            cur = conn.cursor()
-            cur.execute("SELECT id FROM groups WHERE name = ?", (category,))
-            row = cur.fetchone()
-            if row:
-                group_id = row[0]
-            else:
-                cur.execute("INSERT INTO groups (name) VALUES (?)", (category,))
-                group_id = cur.lastrowid
-                conn.commit()
-
-            cur.execute(
-                """
-                INSERT INTO entries (text, status, group_id, created_at, updated_at)
-                VALUES (?, 'pending', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                """,
-                (text, group_id),
-            )
-            conn.commit()
-            entry_id = cur.lastrowid
-            conn.close()
-            print(f"✅ 已添加任务 ID {entry_id}: {text}")
+            task_payload = {
+                "name": text,
+                "category": category,
+                "cycle_type": "once",
+                "task_kind": "scheduled",
+                "source": "todo_cli",
+            }
+            created = create_task(task_payload)
+            print(f"✅ 已添加任务：{text}（周期任务 ID {created['id']}）")
         except Exception as e:
             print(f"❌ 添加失败：{e}")
 
