@@ -625,22 +625,10 @@ def get_entry_archive_state(cur: sqlite3.Cursor, entry_id: int) -> dict | None:
 def complete_legacy_entry(entry_id: int) -> tuple[bool, str]:
     conn = sqlite3.connect(str(TODO_DB))
     try:
-        cur = conn.cursor()
-        state = get_entry_archive_state(cur, entry_id)
+        state = get_entry_archive_state(conn.cursor(), entry_id)
         if not state:
             return False, f"❌ 未找到 ID {entry_id}"
-
-        current_status = state['status']
-        if state['is_archived']:
-            return False, archive_block_message(entry_id, state)
-        if current_status == 'skipped':
-            return False, f"❌ 无法完成已跳过的任务 ID {entry_id}"
-        if current_status == 'done':
-            return True, f"⚠️  ID {entry_id} 已完成"
-
-        cur.execute("UPDATE entries SET status = 'done', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (entry_id,))
-        conn.commit()
-        return True, f"✅ 已完成任务 ID {entry_id}"
+        return False, archive_block_message(entry_id, state)
     finally:
         conn.close()
 
@@ -948,31 +936,20 @@ def cmd_skip(identifier):
             print(f"❌ 跳过失败：{e}")
         return
     entry_id = parse_entry_identifier(identifier)
+    conn = None
     try:
         conn = sqlite3.connect(str(TODO_DB))
         cur = conn.cursor()
         state = get_entry_archive_state(cur, entry_id)
         if not state:
             print(f"❌ 未找到 ID {entry_id}")
-            conn.close()
             return
-
-        current_status = state['status']
-        if state['is_archived']:
-            print(archive_block_message(entry_id, state))
-            conn.close()
-            return
-        if current_status == 'skipped':
-            print(f"⚠️  ID {entry_id} 已经是跳过状态")
-            conn.close()
-            return
-
-        cur.execute("UPDATE entries SET status = 'skipped', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (entry_id,))
-        conn.commit()
-        conn.close()
-        print(f"✅ 已跳过任务 ID {entry_id}")
+        print(archive_block_message(entry_id, state))
     except Exception as e:
         print(f"❌ 跳过失败：{e}")
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def cmd_show(identifier):

@@ -1498,12 +1498,7 @@ def update_today_task(db_path: Path, *, identifier: str, patch: dict) -> dict:
                 conn.execute("UPDATE periodic_occurrences SET scheduled_time = ? WHERE id = ?", (scheduled_time, row_id))
             conn.commit()
             return {"identifier": identifier, "kind": kind, "id": row_id}
-        row = conn.execute("SELECT id FROM entries WHERE id = ?", (row_id,)).fetchone()
-        if row is None:
-            raise ValueError(f"today task {identifier} not found")
-        conn.execute("UPDATE entries SET text = ?, status = ? WHERE id = ?", (name, status, row_id))
-        conn.commit()
-        return {"identifier": identifier, "kind": kind, "id": row_id}
+        raise ValueError("legacy entries are readonly; use a canonical periodic task")
     finally:
         conn.close()
 
@@ -1520,11 +1515,9 @@ def remove_today_task(db_path: Path, *, identifier: str) -> dict:
             conn.execute("DELETE FROM periodic_occurrences WHERE id = ?", (row_id,))
             conn.commit()
             return {"identifier": identifier, "kind": kind, "id": row_id}
-        cur = conn.execute("DELETE FROM entries WHERE id = ?", (row_id,))
-        if cur.rowcount <= 0:
-            raise ValueError(f"today task {identifier} not found")
-        conn.commit()
-        return {"identifier": identifier, "kind": kind, "id": row_id}
+        if kind == "entry":
+            raise ValueError("legacy entries are readonly; archive migration is the only supported write path")
+        raise ValueError("unsupported today task kind")
     finally:
         conn.close()
 
