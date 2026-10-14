@@ -1,148 +1,148 @@
-[English](README.en.md)
+[中文](README.zh.md)
 
 # Chronos
 
-⏰ 开源的周期性任务调度器：像 cron 一样定义"每隔一段时间做一次"的事，自动通过 Telegram / Webhook 发送提醒，必要时把任务落成系统级定时作业。不用搭服务器，一个 CLI 全部搞定。
+⏰ An open-source recurring-task scheduler: define "do this every so often" like cron, get reminded via Telegram / Webhooks, and optionally materialize tasks as OS-level scheduled jobs. No server to run — one CLI does it all.
 
 [![CI](https://github.com/mathlife/chronos/actions/workflows/ci.yml/badge.svg)](https://github.com/mathlife/chronos/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## 这是什么
+## What is it
 
-Chronos 帮你管理所有周期性的事——每天、每周、每月、每 N 小时、某天一次：
+Chronos manages everything recurring — daily, weekly, monthly, every N hours, one-shot on a date:
 
-- **到点提醒**：通过 Telegram 或 Webhook 把提醒推送到你手机上，而不是只写进某台服务器的日志里
-- **自动执行**：系统类任务可以直接落成 Linux crontab 作业，到点自动跑脚本
-- **好管**：自带 Web 管理界面，任务的增删改查、通知渠道配置都在浏览器里点几下完成
-- **好接**：提供 JSON 命令行 API，脚本、其他程序、AI Agent 都能调用
+- **Reminders that reach you**: pushes via Telegram or Webhooks to your phone, not just lines in some server's log
+- **Automatic execution**: system tasks can be materialized as Linux crontab jobs that run scripts on schedule
+- **Easy to manage**: built-in Web dashboard for creating, editing, and organizing tasks and notification channels
+- **Easy to integrate**: JSON CLI API so scripts, other programs, and AI agents can drive it
 
-## 谁适合用
+## Who is it for
 
-- **个人用户**：还信用卡提醒、吃药提醒、定期备份、每月抢券（比如农行每月秒杀）、域名续费提醒……
-- **开发者 / 运维**：定时跑脚本、服务健康检查、日志清理、数据同步，不用再为每个小任务写 systemd unit
-- **AI Agent 工作流**：给 OpenClaw 这类 Agent 提供"到点做事"的能力，通过 JSON API 集成
+- **Individuals**: credit-card repayment reminders, medication reminders, regular backups, monthly flash-sale alerts, domain renewal reminders…
+- **Developers / ops**: scheduled scripts, health checks, log rotation, data syncs — without writing a systemd unit for every little job
+- **AI agent workflows**: gives agents like OpenClaw "do things on schedule" capability via the JSON API
 
-## 快速开始（5 分钟）
+## Quickstart (5 minutes)
 
 ```bash
-# 1. 交互式配置（选择通知渠道）
+# 1. Interactive setup (choose notification channels)
 python3 skills/chronos/scripts/setup_config.py --interactive
 
-# 非交互式示例：Telegram 渠道
+# Non-interactive example: Telegram channel
 python3 skills/chronos/scripts/setup_config.py \
   --channel telegram \
   --channel-id tg-main \
   --bot-token "<bot_token>" \
   --chat-id "<chat_id>"
 
-# Webhook 渠道
+# Webhook channel
 python3 skills/chronos/scripts/setup_config.py \
   --channel webhook \
   --channel-id hook-main \
   --webhook-url "https://example.com/chronos-hook"
 
-# 2. 添加任务
-# 每天 09:30 提醒
-python3 skills/chronos/scripts/todo.py add "还信用卡" \
+# 2. Add tasks
+# Daily at 09:30
+python3 skills/chronos/scripts/todo.py add "Pay credit card" \
   --cycle-type daily \
   --time 09:30
 
-# 每 4 小时一次
-python3 skills/chronos/scripts/todo.py add "喝水休息" \
+# Every 4 hours
+python3 skills/chronos/scripts/todo.py add "Stretch break" \
   --cycle-type hourly \
   --interval-hours 4 \
   --time 08:00
 
-# 每月 1、10、25 号
-python3 skills/chronos/scripts/todo.py add "检查账单" \
+# On the 1st, 10th, 25th of each month
+python3 skills/chronos/scripts/todo.py add "Review bills" \
   --cycle-type monthly_dates \
   --monthly-dates 1,10,25 \
   --time 09:00
 
-# 每周一 10:00
-python3 skills/chronos/scripts/todo.py add "每周例会" \
+# Every Monday at 10:00
+python3 skills/chronos/scripts/todo.py add "Weekly standup" \
   --cycle-type weekly \
   --weekday 0 \
   --time 10:00
 
-# 3. 查看今天的任务
+# 3. See today's tasks
 python3 skills/chronos/scripts/todo.py today
 ```
 
-## 和其他方案比
+## How it compares
 
 | | cron | systemd timers | APScheduler | **Chronos** |
 |---|---|---|---|---|
-| 通知提醒 | ❌（需自己接邮件） | ❌ | ❌（需自己写） | ✅ Telegram / Webhook 开箱即用 |
-| 管理界面 | ❌ | ❌ | ❌ | ✅ Web Dashboard |
-| 跨平台 | 仅 Unix | 仅 Linux | ✅（嵌入代码） | ✅（独立工具，Linux/macOS） |
-| 使用门槛 | 写 crontab 表达式 | 写 unit 文件 | 写 Python 代码 | ✅ 一条命令添加任务 |
-| 程序化调用 | ❌ | ❌ | ✅ | ✅ JSON CLI API |
-| 定时执行脚本 | ✅ | ✅ | 需自己实现 | ✅ 可落成 crontab 作业 |
+| Notifications | ❌ (wire up email yourself) | ❌ | ❌ (write it yourself) | ✅ Telegram / Webhooks out of the box |
+| Management UI | ❌ | ❌ | ❌ | ✅ Web dashboard |
+| Cross-platform | Unix only | Linux only | ✅ (embedded in code) | ✅ (standalone tool, Linux/macOS) |
+| Learning curve | crontab expressions | unit files | Python code | ✅ one command per task |
+| Programmatic API | ❌ | ❌ | ✅ | ✅ JSON CLI API |
+| Run scripts on schedule | ✅ | ✅ | DIY | ✅ materializes as crontab jobs |
 
-一句话：cron 只管"到点执行"，Chronos 还管"到点提醒你"和"让你管得明白"。
+In one line: cron only does "run on time" — Chronos also does "remind me on time" and "let me manage it all clearly".
 
-## Web 管理界面
+## Web dashboard
 
 ```bash
-# 本机访问（默认，无需鉴权）
+# Local access (default, no auth required)
 python3 skills/chronos/scripts/web_dashboard.py --host 127.0.0.1 --port 8765
 
-# 远程访问（建议开启基础鉴权）
+# Remote access (recommended: enable basic auth)
 python3 skills/chronos/scripts/web_dashboard.py \
   --host 0.0.0.0 \
   --port 8765 \
   --basic-auth "admin:change-me-now"
 
-# 只读模式（仅查询，禁用修改接口）
+# Read-only mode (queries only, mutations disabled)
 python3 skills/chronos/scripts/web_dashboard.py --host 127.0.0.1 --port 8765 --read-only
 ```
 
-浏览器打开 `http://127.0.0.1:8765/`：查看配置、通知渠道、全部周期任务、今日任务；增删改任务、管理渠道、健康检查都在界面里完成。
+Open `http://127.0.0.1:8765/` in your browser: inspect config, channels, all periodic tasks, today's tasks; create/update/remove tasks, manage channels, and check health — all in the UI.
 
-远程部署建议：保持 `--host 127.0.0.1` 并通过可信反向代理暴露；绑定非本地地址时务必设置 `--basic-auth`。
+For remote deployment, keep `--host 127.0.0.1` and expose it through a trusted reverse proxy; always set `--basic-auth` when binding a non-local address.
 
-## JSON API（供程序/脚本调用）
+## JSON API (for programs and scripts)
 
-`scripts/chronos_api.py` 提供机器友好的 JSON 输入输出：
+`scripts/chronos_api.py` provides machine-friendly JSON input/output:
 
 ```bash
-# 列出任务
+# List tasks
 python3 skills/chronos/scripts/chronos_api.py task list --active-only all
 
-# 创建任务
+# Create a task
 python3 skills/chronos/scripts/chronos_api.py task create \
-  --payload '{"name":"每周例会","cycle_type":"weekly","weekday":0,"time_of_day":"10:00","task_kind":"scheduled"}'
+  --payload '{"name":"Weekly standup","cycle_type":"weekly","weekday":0,"time_of_day":"10:00","task_kind":"scheduled"}'
 
-# 更新任务
+# Update a task
 python3 skills/chronos/scripts/chronos_api.py task update --id 12 \
   --payload '{"delivery_target":"tg-main,hook-main"}'
 
-# 配置通知渠道
+# Configure a notification channel
 python3 skills/chronos/scripts/chronos_api.py channel put \
   --payload '{"id":"tg-main","type":"telegram","enabled":true,"config":{"bot_token":"<token>","chat_id":"<chat_id>"}}'
 ```
 
-所有命令返回 JSON：成功 `{"ok": true, "data": ...}`，失败 `{"ok": false, "error": "..."}`。
+Every command returns JSON: success `{"ok": true, "data": ...}`, error `{"ok": false, "error": "..."}`.
 
-## 任务类型速查
+## Task types cheat sheet
 
-| cycle_type | 说明 | 示例 |
+| cycle_type | Meaning | Example |
 |---|---|---|
-| `once` | 单次，指定日期 | `--cycle-type once --start-date 2026-05-01 --time 10:00` |
-| `daily` | 每天 | `--cycle-type daily --time 09:30` |
-| `hourly` | 每 N 小时（按天展开） | `--cycle-type hourly --interval-hours 4 --time 08:00` |
-| `weekly` | 每周（0=周一） | `--cycle-type weekly --weekday 0 --time 10:00` |
-| `monthly_dates` | 每月固定几号 | `--cycle-type monthly_dates --monthly-dates 1,10,25` |
-| `monthly_range` | 每月日期窗口内，可配每月限额 | `--cycle-type monthly_range --range-start 1 --range-end 31 --n-per-month 1` |
+| `once` | One-shot on a date | `--cycle-type once --start-date 2026-05-01 --time 10:00` |
+| `daily` | Every day | `--cycle-type daily --time 09:30` |
+| `hourly` | Every N hours (expanded per day) | `--cycle-type hourly --interval-hours 4 --time 08:00` |
+| `weekly` | Weekly (0 = Monday) | `--cycle-type weekly --weekday 0 --time 10:00` |
+| `monthly_dates` | Fixed days of month | `--cycle-type monthly_dates --monthly-dates 1,10,25` |
+| `monthly_range` | Day window each month, optional monthly quota | `--cycle-type monthly_range --range-start 1 --range-end 31 --n-per-month 1` |
 
-系统类任务（自动执行脚本而非仅提醒）：加 `--task-kind system --system-command "python3 /path/to/script.py"`，Chronos 会在 Linux 上为其创建 crontab 作业。详见下方"深入"部分的说明。
+System tasks (run a script instead of just reminding): add `--task-kind system --system-command "python3 /path/to/script.py"` and Chronos creates a crontab job for it on Linux. See the internals doc below for details.
 
-## 深入
+## Go deeper
 
-- [架构与数据模型](docs/architecture.md) —— 表结构、各类调度的语义、系统任务的执行机制
-- [历史数据迁移](docs/architecture.md#历史数据迁移) —— 从旧版 `entries` 表迁移到标准任务的操作步骤
-- [更新日志](CHANGELOG.md)
+- [Architecture & data model](docs/architecture.md) — table layout, scheduling semantics, how system tasks execute
+- [Historical data migration](docs/architecture.md#historical-data-migration) — migrating from the legacy `entries` table
+- [Changelog](CHANGELOG.md)
 
 ## License
 
