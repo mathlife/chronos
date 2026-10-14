@@ -1,275 +1,149 @@
-[中文文档 (Chinese)](README.zh.md)
+[English](README.en.md)
 
 # Chronos
 
-Chronos is a lightweight recurring-task engine backed by `periodic_tasks` + `periodic_occurrences`, with temporary compatibility for legacy `entries` rows.
+⏰ 开源的周期性任务调度器：像 cron 一样定义"每隔一段时间做一次"的事，自动通过 Telegram / Webhook 发送提醒，必要时把任务落成系统级定时作业。不用搭服务器，一个 CLI 全部搞定。
 
-Chronos runtime no longer requires `openclaw` for normal scheduling/notification flows. OpenClaw (or any external caller) can integrate through the JSON CLI API in `scripts/chronos_api.py`.
+[![CI](https://github.com/mathlife/chronos/actions/workflows/ci.yml/badge.svg)](https://github.com/mathlife/chronos/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## Phase-1 data model direction
+## 这是什么
 
-- `periodic_tasks` is the canonical definition table for scheduled work.
-- `periodic_occurrences` is the canonical execution/reminder table.
-- `entries` remains only for inbox-style one-shot notes and legacy compatibility.
-- Scheduled `once` tasks with an explicit `start_date` now use canonical task storage.
-- `system` tasks can be materialized as OS-level scheduled jobs on Linux via `crontab`, instead of waiting for model-side reasoning loops.
-- `monthly_dates` is a supported cycle type.
-- `hourly` is a supported cycle type, with `interval_hours` + `time_of_day` anchor semantics.
-- Monthly scheduling is unified around:
-  - `monthly_dates` for fixed calendar dates (single or multiple days)
-  - `monthly_range` for day-window cadence, optionally with `n_per_month` quota (including cross-month windows like `10 -> next-month 03`)
-- Special system behaviors should live in explicit task metadata (`special_handler`) instead of free-text regex whenever possible.
+Chronos 帮你管理所有周期性的事——每天、每周、每月、每 N 小时、某天一次：
 
-## Quick examples
+- **到点提醒**：通过 Telegram 或 Webhook 把提醒推送到你手机上，而不是只写进某台服务器的日志里
+- **自动执行**：系统类任务可以直接落成 Linux crontab 作业，到点自动跑脚本
+- **好管**：自带 Web 管理界面，任务的增删改查、通知渠道配置都在浏览器里点几下完成
+- **好接**：提供 JSON 命令行 API，脚本、其他程序、AI Agent 都能调用
+
+## 谁适合用
+
+- **个人用户**：还信用卡提醒、吃药提醒、定期备份、每月抢券（比如农行每月秒杀）、域名续费提醒……
+- **开发者 / 运维**：定时跑脚本、服务健康检查、日志清理、数据同步，不用再为每个小任务写 systemd unit
+- **AI Agent 工作流**：给 OpenClaw 这类 Agent 提供"到点做事"的能力，通过 JSON API 集成
+
+## 快速开始（5 分钟）
 
 ```bash
+# 1. 交互式配置（选择通知渠道）
 python3 skills/chronos/scripts/setup_config.py --interactive
 
-# Optional: migrate legacy workspace files into .Chonos/config layout (recommended once)
-python3 skills/chronos/scripts/migrate_workspace_layout.py
-python3 skills/chronos/scripts/migrate_workspace_layout.py --apply
-python3 skills/chronos/scripts/migrate_workspace_layout.py --apply --remove-source
-
-# Linux non-interactive bootstrap examples:
-# Telegram
+# 非交互式示例：Telegram 渠道
 python3 skills/chronos/scripts/setup_config.py \
   --channel telegram \
   --channel-id tg-main \
   --bot-token "<bot_token>" \
   --chat-id "<chat_id>"
 
-# Webhook
+# Webhook 渠道
 python3 skills/chronos/scripts/setup_config.py \
   --channel webhook \
   --channel-id hook-main \
   --webhook-url "https://example.com/chronos-hook"
 
-# Optional: custom config location
-export CHRONOS_CONFIG_PATH="$(pwd)/.Chonos/config/config.json"
+# 2. 添加任务
+# 每天 09:30 提醒
+python3 skills/chronos/scripts/todo.py add "还信用卡" \
+  --cycle-type daily \
+  --time 09:30
 
-python3 skills/chronos/scripts/todo.py add "一次性计划任务" \
-  --cycle-type once \
-  --start-date 2026-03-27 \
-  --time 10:00
-
-python3 skills/chronos/scripts/todo.py add "同步 subagent 记忆" \
+# 每 4 小时一次
+python3 skills/chronos/scripts/todo.py add "喝水休息" \
   --cycle-type hourly \
   --interval-hours 4 \
-  --time 08:00 \
-  --task-kind system \
-  --special-handler sync_subagent_memory
+  --time 08:00
 
-python3 skills/chronos/scripts/todo.py add "Meta-Review fallback" \
-  --cycle-type daily \
-  --time 02:00 \
-  --task-kind system \
-  --special-handler meta_review_fallback
+# 每月 1、10、25 号
+python3 skills/chronos/scripts/todo.py add "检查账单" \
+  --cycle-type monthly_dates \
+  --monthly-dates 1,10,25 \
+  --time 09:00
 
-python3 skills/chronos/scripts/todo.py add "刷新本地缓存" \
-  --cycle-type daily \
-  --time 09:30 \
-  --task-kind system \
-  --system-command "python3 /home/ubuntu/chronos/scripts/refresh_cache.py"
+# 每周一 10:00
+python3 skills/chronos/scripts/todo.py add "每周例会" \
+  --cycle-type weekly \
+  --weekday 0 \
+  --time 10:00
 
-python3 skills/chronos/scripts/migrate_legacy_entries.py --db "$(pwd)/.Chonos/config/todo.db"
-python3 skills/chronos/scripts/migrate_legacy_entries.py --db "$(pwd)/.Chonos/config/todo.db" --apply
-python3 skills/chronos/scripts/archive_legacy_entries.py --db "$(pwd)/.Chonos/config/todo.db"
-python3 skills/chronos/scripts/archive_legacy_entries.py --db "$(pwd)/.Chonos/config/todo.db" --apply
-python3 skills/chronos/scripts/normalize_historical_residues.py --db "$(pwd)/.Chonos/config/todo.db"
-python3 skills/chronos/scripts/normalize_historical_residues.py --db "$(pwd)/.Chonos/config/todo.db" --apply
-python3 skills/chronos/scripts/todo.py complete-overdue --dry-run
-python3 skills/chronos/scripts/schema_preflight.py
+# 3. 查看今天的任务
+python3 skills/chronos/scripts/todo.py today
 ```
 
-## Integration API (for OpenClaw callers)
+## 和其他方案比
 
-`scripts/chronos_api.py` provides machine-friendly JSON IO for task/channel management.
+| | cron | systemd timers | APScheduler | **Chronos** |
+|---|---|---|---|---|
+| 通知提醒 | ❌（需自己接邮件） | ❌ | ❌（需自己写） | ✅ Telegram / Webhook 开箱即用 |
+| 管理界面 | ❌ | ❌ | ❌ | ✅ Web Dashboard |
+| 跨平台 | 仅 Unix | 仅 Linux | ✅（嵌入代码） | ✅（独立工具，Linux/macOS） |
+| 使用门槛 | 写 crontab 表达式 | 写 unit 文件 | 写 Python 代码 | ✅ 一条命令添加任务 |
+| 程序化调用 | ❌ | ❌ | ✅ | ✅ JSON CLI API |
+| 定时执行脚本 | ✅ | ✅ | 需自己实现 | ✅ 可落成 crontab 作业 |
 
-```bash
-# List tasks
-python3 skills/chronos/scripts/chronos_api.py task list --active-only all
+一句话：cron 只管"到点执行"，Chronos 还管"到点提醒你"和"让你管得明白"。
 
-# Create task
-python3 skills/chronos/scripts/chronos_api.py task create \
-  --payload '{"name":"每周例会","cycle_type":"weekly","weekday":0,"time_of_day":"10:00","task_kind":"scheduled"}'
-
-# Patch task
-python3 skills/chronos/scripts/chronos_api.py task update --id 12 \
-  --payload '{"delivery_target":"tg-main,hook-main"}'
-
-# Upsert notification channel
-python3 skills/chronos/scripts/chronos_api.py channel put \
-  --payload '{"id":"tg-main","type":"telegram","enabled":true,"config":{"bot_token":"<token>","chat_id":"<chat_id>"}}'
-
-# Remove channel
-python3 skills/chronos/scripts/chronos_api.py channel remove --id tg-main
-```
-
-All commands return a JSON object:
-- success: `{"ok": true, "data": ...}`
-- error: `{"ok": false, "error": "..."}`
-
-## Web Dashboard (query + manage)
-
-Chronos provides a built-in Web UI to view and manage settings/tasks.
+## Web 管理界面
 
 ```bash
-# Linux local-only (default, no auth required)
+# 本机访问（默认，无需鉴权）
 python3 skills/chronos/scripts/web_dashboard.py --host 127.0.0.1 --port 8765
 
-# Linux remote access (recommended: enable basic auth)
+# 远程访问（建议开启基础鉴权）
 python3 skills/chronos/scripts/web_dashboard.py \
   --host 0.0.0.0 \
   --port 8765 \
   --basic-auth "admin:change-me-now"
 
-# Read-only mode (query only, mutation APIs disabled)
+# 只读模式（仅查询，禁用修改接口）
 python3 skills/chronos/scripts/web_dashboard.py --host 127.0.0.1 --port 8765 --read-only
 ```
 
-Open in browser:
-- `http://127.0.0.1:8765/`
+浏览器打开 `http://127.0.0.1:8765/`：查看配置、通知渠道、全部周期任务、今日任务；增删改任务、管理渠道、健康检查都在界面里完成。
 
-Features:
-- Query: runtime config, channels, all periodic tasks, today's tasks
-- Manage: task create/update/remove (deactivate or hard delete), channel upsert/remove, legacy `chat_id` update
-- Health and basic metrics: `GET /api/v1/health`
+远程部署建议：保持 `--host 127.0.0.1` 并通过可信反向代理暴露；绑定非本地地址时务必设置 `--basic-auth`。
 
-Recommended deployment:
-- keep `--host 127.0.0.1` and expose through trusted reverse proxy when remote access is needed
-- when binding non-local host, set `--basic-auth user:password` (otherwise the server will refuse to start unless explicitly overridden with `--allow-unauthenticated-remote`)
+## JSON API（供程序/脚本调用）
 
-## Hourly cadence semantics
+`scripts/chronos_api.py` 提供机器友好的 JSON 输入输出：
 
-`cycle_type=hourly` is day-scoped and canonical.
+```bash
+# 列出任务
+python3 skills/chronos/scripts/chronos_api.py task list --active-only all
 
-Required fields:
-- `interval_hours`: integer 1-24
-- `time_of_day`: anchor `HH:MM`
+# 创建任务
+python3 skills/chronos/scripts/chronos_api.py task create \
+  --payload '{"name":"每周例会","cycle_type":"weekly","weekday":0,"time_of_day":"10:00","task_kind":"scheduled"}'
 
-Expansion rule for each active day:
-- start from the anchor minute
-- emit all same-minute slots every `interval_hours`
-- include earlier same-day slots too, so `--interval-hours 4 --time 08:00` expands to:
-  - `00:00, 04:00, 08:00, 12:00, 16:00, 20:00`
+# 更新任务
+python3 skills/chronos/scripts/chronos_api.py task update --id 12 \
+  --payload '{"delivery_target":"tg-main,hook-main"}'
 
-This is conservative and matches the legacy `每 4 小时：同步 subagent 记忆` expectation without introducing cross-day offset state.
-
-## Task categories
-
-Chronos now has these user-facing scheduling categories:
-
-- `once`: a one-shot task with explicit `start_date`
-- `monthly_dates`: run on explicit day list (for example `1,10,25`)
-- `monthly_range`: run inside a day window; optional `n_per_month` adds quota semantics
-- other periodic tasks: `daily`, `hourly`, `weekly`
-
-Compatibility note:
-- legacy `monthly_fixed` is normalized to `monthly_dates`
-- legacy `monthly_n_times` is normalized to `monthly_range` + `n_per_month`
-
-For command-style deterministic system work:
-
-- set `task_kind=system`
-- set `special_handler=run_command` implicitly via `--system-command`
-- Chronos creates an execution job on Linux via `crontab`; system tasks do not emit a five-minute pre-reminder
-- `python3` and `bash` accept existing `.py`/`.sh` files only; inline (`-c`), module (`-m`), and stdin execution are blocked
-- scripts must be under the Chronos project root or a configured `system_command_allowed_roots` directory
-- execution is atomically claimed as `running`; success becomes `completed`, policy rejection becomes `skipped`, and command failure becomes `failed`
-- notification results are recorded per channel; failed channels retry independently without resending successful channels
-
-Example additional allowed root in `.Chonos/config/config.json`:
-
-```json
-{
-  "system_command_allowed_roots": [
-    "/home/ubuntu/automation"
-  ]
-}
+# 配置通知渠道
+python3 skills/chronos/scripts/chronos_api.py channel put \
+  --payload '{"id":"tg-main","type":"telegram","enabled":true,"config":{"bot_token":"<token>","chat_id":"<chat_id>"}}'
 ```
 
-`sync_subagent_memory` now reads a file-backed ledger at `memory/subagent_sync_ledger.json` via `memory_manager.py pending-subagents`, so the hourly handler no longer guesses session ids from all memory. Ledger schema/status/pending semantics are centralized in `scripts/subagent_sync_ledger.py`, and OpenClaw auto-records completed subagent sessions into that ledger on the subagent completion path. `memory_manager.py record-subagent <session_id>` remains available only for manual backfill. Successful syncs are marked handled with `mark-subagent-synced`, and failures remain pending with an updated error trail.
+所有命令返回 JSON：成功 `{"ok": true, "data": ...}`，失败 `{"ok": false, "error": "..."}`。
 
-When `complete-overdue` processes multiple overdue hourly occurrences for the same task on the same day and that task has a `special_handler`, Chronos now runs the handler once for that task/day batch, then marks every overdue occurrence completed with `completion_mode=fallback_handler_merged` and a per-occurrence `special_handler_result` trail (`merge_key`, merged index/count, source occurrence).
+## 任务类型速查
 
-## Monthly quota over daily cadence
+| cycle_type | 说明 | 示例 |
+|---|---|---|
+| `once` | 单次，指定日期 | `--cycle-type once --start-date 2026-05-01 --time 10:00` |
+| `daily` | 每天 | `--cycle-type daily --time 09:30` |
+| `hourly` | 每 N 小时（按天展开） | `--cycle-type hourly --interval-hours 4 --time 08:00` |
+| `weekly` | 每周（0=周一） | `--cycle-type weekly --weekday 0 --time 10:00` |
+| `monthly_dates` | 每月固定几号 | `--cycle-type monthly_dates --monthly-dates 1,10,25` |
+| `monthly_range` | 每月日期窗口内，可配每月限额 | `--cycle-type monthly_range --range-start 1 --range-end 31 --n-per-month 1` |
 
-For tasks like `福建农行秒杀京东卡`, the intended semantic is not plain `daily`; it is:
-- remind on a daily cadence while the month quota is still unused
-- once any occurrence is completed, consume the monthly quota
-- auto-complete the rest of that month's pending/reminded occurrences so no more reminders fire
-- resume naturally after the monthly counter resets on the next month boundary
+系统类任务（自动执行脚本而非仅提醒）：加 `--task-kind system --system-command "python3 /path/to/script.py"`，Chronos 会在 Linux 上为其创建 crontab 作业。详见下方"深入"部分的说明。
 
-This is represented as:
-- `cycle_type=monthly_range`
-- `range_start=1`
-- `range_end=31`
-- `n_per_month=1`
-- `weekday=NULL` to mean daily cadence instead of weekly cadence
+## 深入
 
-## Legacy migration policy
+- [架构与数据模型](docs/architecture.md) —— 表结构、各类调度的语义、系统任务的执行机制
+- [历史数据迁移](docs/architecture.md#历史数据迁移) —— 从旧版 `entries` 表迁移到标准任务的操作步骤
+- [更新日志](CHANGELOG.md)
 
-Phase 2+ adds `scripts/migrate_legacy_entries.py` for conservative migration out of `entries`.
+## License
 
-What it will do automatically:
-- link obvious legacy rows to an already-existing canonical task by deterministic normalized name
-- create an explicit `task_kind=system` + `special_handler=meta_review_fallback` task for legacy Meta-Review rows
-- create an explicit `task_kind=system` + `cycle_type=hourly` + `special_handler=sync_subagent_memory` task for legacy `每 N 小时 ... memory_manager.py sync` rows
-- create canonical tasks for simple bracketed recurring rows only when the schedule is deterministic
-
-What it will not do automatically:
-- ambiguous free-text rows
-- unsupported every-N-hours rows without known handler semantics
-
-Traceability is preserved through `periodic_tasks.legacy_entry_id` and `source` (`legacy_entries_linked` / `legacy_entries_migrated`).
-
-## Final legacy archive step
-
-After migration has linked canonical tasks, run `scripts/archive_legacy_entries.py`.
-
-What it does:
-- finds `entries` rows already linked from `periodic_tasks.legacy_entry_id`
-- adds conservative archive metadata columns on `entries` if missing:
-  - `chronos_readonly`
-  - `chronos_archived_at`
-  - `chronos_archive_reason`
-  - `chronos_archived_from_status`
-  - `chronos_linked_task_id`
-- prefers `status='archived'` as the first-class archive marker when the live `entries` schema allows it
-- still treats archive metadata as the compatibility fallback if an older constrained `entries.status` enum cannot store `archived`
-- repairs partially archived rows by completing missing readonly/archive metadata
-- keeps the original row in place for audit / traceability
-- keeps active Chronos surfaces clean because linked rows are already excluded from live list/snapshot/overdue queries
-
-Operational boundary:
-- canonical live scheduling state remains `periodic_tasks` + `periodic_occurrences`
-- legacy `entries` archive state is now interpreted by shared helper semantics: `status='archived'` first, then `chronos_archived_at` / `chronos_archive_reason` / `chronos_archived_from_status`
-- Chronos does not attempt a broad live-table migration of arbitrary `entries.status` constraints; if a deployment still forbids `archived`, the archive script preserves the prior status and relies on `chronos_archived_*` metadata instead
-
-Operational effect:
-- migrated legacy rows stop looking like live legacy tasks
-- `todo.py show ID<n>` still exposes the archive trail
-- `todo.py complete ID<n>` / `skip ID<n>` now fail closed on readonly archived legacy rows and point operators back to the linked canonical periodic task
-
-Recommended sequence:
-1. `python3 skills/chronos/scripts/migrate_legacy_entries.py --db /path/to/.Chonos/config/todo.db`
-2. `python3 skills/chronos/scripts/migrate_legacy_entries.py --db /path/to/.Chonos/config/todo.db --apply`
-3. `python3 skills/chronos/scripts/archive_legacy_entries.py --db /path/to/.Chonos/config/todo.db`
-4. `python3 skills/chronos/scripts/archive_legacy_entries.py --db /path/to/.Chonos/config/todo.db --apply`
-5. `python3 skills/chronos/scripts/normalize_historical_residues.py --db /path/to/.Chonos/config/todo.db`
-6. `python3 skills/chronos/scripts/normalize_historical_residues.py --db /path/to/.Chonos/config/todo.db --apply`
-
-## Historical residue cleanup
-
-`normalize_historical_residues.py` is intentionally narrow. It only touches residues that are already outside normal live semantics:
-
-- orphan `periodic_occurrences` whose `task_id` no longer exists
-- `cycle_type='once'` tasks where `start_date IS NULL` but a single canonical date can be inferred safely
-
-Normalization rules:
-- orphan occurrences are deleted
-- once task with exactly one occurrence date → `start_date = that occurrence date`
-- once task with no occurrence but existing `end_date` → `start_date = end_date`
-- anything else stays untouched for manual review
-
-This keeps cleanup deterministic and avoids changing active recurring behavior.
+MIT
